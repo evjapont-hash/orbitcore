@@ -1,0 +1,83 @@
+name: deploy-viewer
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 */6 * * *'   # every 6 hours, at minute 23
+  workflow_dispatch:         # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # CelesTrak refreshes its data every few hours and asks users not to re-download it
+      # constantly, so the catalog is cached per 6-hour window: pushes within the same window
+      # reuse it, and only the first run of each window downloads.
+      - name: Compute catalog cache key
+        id: bucket
+        run: echo "key=catalog-$(date -u +%Y%m%d)-$(( 10#$(date -u +%H) / 6 ))" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached catalog
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: catalog-cache
+          key: ${{ steps.bucket.outputs.key }}
+
+      - name: Download catalog from CelesTrak
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p catalog-cache
+          bash scripts/fetch_catalog.sh catalog-cache/catalog.tle
+          date -u +'%Y-%m-%d %H:%M UTC' > catalog-cache/fetched.txt
+
+      - name: Install Emscripten
+        run: |
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$HOME/emsdk"
+          "$HOME/emsdk/emsdk" install 6.0.13
+          "$HOME/emsdk/emsdk" activate 6.0.13
+
+      - name: Build WebAssembly
+        run: |
+          source "$HOME/emsdk/emsdk_env.sh"
+          emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-wasm -j
+
+      - name: Assemble site
+        run: |
+          mkdir site
+          cp web/index.html web/main.js web/mat4.js site/
+          cp build-wasm/orbitcore_wasm.js build-wasm/orbitcore_wasm.wasm site/
+          cp catalog-cache/catalog.tle site/catalog.tle
+          printf '{"catalogFetchedUtc": "%s", "commit": "%s"}\n' \
+            "$(cat catalog-cache/fetched.txt)" "${GITHUB_SHA::7}" > site/build-info.json
+          cat site/build-info.json
+          ls -lh site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

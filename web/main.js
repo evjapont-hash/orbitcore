@@ -170,6 +170,14 @@ async function main() {
   const response = await fetch('catalog.tle');
   if (!response.ok) throw new Error(`could not load catalog.tle (HTTP ${response.status})`);
   const fileDate = response.headers.get('last-modified');
+
+  // Provenance written by the deploy workflow (absent when running locally).
+  let buildInfo = null;
+  try {
+    const info = await fetch('build-info.json');
+    if (info.ok) buildInfo = await info.json();
+  } catch (_) { /* running locally */ }
+
   const text = await response.text();
   const count = engine.loadTle(text);
   const skippedDeepSpace = engine.skippedDeepSpace();
@@ -284,8 +292,8 @@ async function main() {
       `Ref frame     TEME (inertial), km`,
       `Objects       ${count.toLocaleString()} propagated (SGP4, WGS-72)`,
       `Skipped       ${skippedDeepSpace.toLocaleString()} deep-space`,
-      `Catalog file  ${fileDate || 'date unknown'}`,
-      '',
+      `Data          CelesTrak GP, ${buildInfo ? 'fetched ' + buildInfo.catalogFetchedUtc : 'file dated ' + (fileDate || 'unknown')}`,
+      `Build         ${buildInfo ? buildInfo.commit : 'local'}`,      '',
       `Propagate     ${propagateMs.toFixed(1)} ms (WebAssembly, f64)`,
       `Render        ${fps.toFixed(0)} fps`,
       `Camera        ${(cam.dist * EARTH_RADIUS_KM).toFixed(0)} km from Earth centre`,
