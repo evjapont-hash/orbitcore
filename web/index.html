@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO situational awareness · orbitcore</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #05080f;
+      --panel: rgba(10, 16, 26, 0.84);
+      --line: #22334a;
+      --text: #cfe0f5;
+      --dim: #7f93ad;
+      --accent: #50c8ff;
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      overflow: hidden;
+    }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+    .panel {
+      position: fixed;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 10px 12px;
+    }
+    #hud { top: 12px; left: 12px; white-space: pre; min-width: 320px; }
+    #legend { top: 12px; right: 12px; }
+    #legend div { display: flex; align-items: center; gap: 8px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+    #controls { bottom: 12px; left: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    #controls .label { color: var(--dim); margin-right: 4px; }
+    button {
+      font: inherit;
+      color: var(--text);
+      background: #0e1a2a;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--dim); }
+    button.active { border-color: var(--accent); color: var(--accent); }
+    #hint { bottom: 12px; right: 12px; color: var(--dim); }
+    #message {
+      position: fixed;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+      color: var(--dim);
+      background: var(--bg);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div id="hud" class="panel"></div>
+  <div id="legend" class="panel"></div>
+  <div id="controls" class="panel">
+    <span class="label">Time</span>
+    <button id="btn-pause">Pause</button>
+    <button data-scale="1">x1</button>
+    <button data-scale="60">x60</button>
+    <button data-scale="600">x600</button>
+    <button data-scale="3600">x3600</button>
+    <button id="btn-now">Now</button>
+  </div>
+  <div id="hint" class="panel">drag: rotate · wheel: zoom</div>
+  <div id="message">Starting…</div>
+
+  <!-- orbitcore compiled to WebAssembly (defines the global createOrbitcore) -->
+  <script src="orbitcore_wasm.js"></script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

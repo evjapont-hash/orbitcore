@@ -3,3 +3,6 @@ build/
 compile_commands.json
 build-release/
 build-wasm/
+web/orbitcore_wasm.js
+web/orbitcore_wasm.wasm
+web/catalog.tle
