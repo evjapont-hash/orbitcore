@@ -28,6 +28,9 @@ if(ORBITCORE_SANITIZE AND NOT MSVC)
   target_link_options(orbitcore PUBLIC -fsanitize=address,undefined)
 endif()
 
+add_executable(orbit_cli tools/orbit_cli.cpp)
+target_link_libraries(orbit_cli PRIVATE orbitcore)
+
 if(ORBITCORE_BUILD_TESTS)
   enable_testing()
   add_executable(orbitcore_tests

@@ -81,3 +81,18 @@ TEST_CASE(rtn_basis_circular_orbit) {
   CHECK_NEAR(rtn.y, 1.0, 1e-12);   // transverse
   CHECK_NEAR(rtn.z, -2.0, 1e-12);  // normal
 }
+
+TEST_CASE(calendar_roundtrip) {
+  const CalendarDate cases[] = {
+      {2026, 11, 5, 12, 34, 56.789}, {2000, 2, 29, 0, 0, 0.0},   {2024, 12, 31, 23, 59, 59.5},
+      {1970, 1, 1, 0, 0, 0.0},       {2008, 9, 20, 12, 25, 40.0}, {2099, 3, 1, 6, 7, 8.25}};
+  for (const auto& c : cases) {
+    const auto back = to_calendar(to_julian(c));
+    CHECK(back.year == c.year);
+    CHECK(back.month == c.month);
+    CHECK(back.day == c.day);
+    CHECK(back.hour == c.hour);
+    CHECK(back.minute == c.minute);
+    CHECK_NEAR(back.second, c.second, 1e-3);
+  }
+}

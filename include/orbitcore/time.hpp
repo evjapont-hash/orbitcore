@@ -16,7 +16,7 @@ struct CalendarDate {
   double second;
 };
 
-// Gregorian calendar -> Julian date. Valid 1900-2100 (Vallado `jday`).
+// Gregorian calendar -> Julian date. Valid 1900-03-01 to 2100-02-28 (Vallado `jday` assumes every 4th year is a leap year).
 JulianDate to_julian(const CalendarDate& date);
 
 // TLE-style epoch: day-of-year where 1.0 == Jan 1 00:00:00.
@@ -32,5 +32,8 @@ double minutes_between(JulianDate from, JulianDate to);
 // i.e. up to ~0.4 km of equatorial position error in ECEF. Document or add
 // EOP (UT1-UTC) support when you need better.
 double gmst_rad(JulianDate ut1);
+
+// Julian date -> Gregorian calendar date (UTC), seconds rounded to the nearest millisecond.
+CalendarDate to_calendar(JulianDate jd);
 
 }  // namespace orbitcore
