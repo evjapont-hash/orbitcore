@@ -23,6 +23,21 @@ conjunction assessment. Uses only unclassified public element data.
 
 Limitations: near-Earth only (period < 225 min); public TLE accuracy is about 1 km at epoch.
 
+## Performance
+
+Bulk propagation of the public catalog (CelesTrak "active" group plus four debris groups,
+downloaded in early November 2026): 17,766 near-Earth objects propagated to a common
+instant. 792 deep-space objects in the files are skipped.
+
+| Objects | Median time for all objects | Per object |
+|---------|-----------------------------|------------|
+| 17,766 (real catalog) | 3.41 ms | 192 ns |
+| 88,830 (real catalog repeated 5x, synthetic) | 17.69 ms | 199 ns |
+
+Single thread, SGP4 in double precision, Release build (`-DCMAKE_BUILD_TYPE=Release`),
+GCC 15.2.0, CPU: Intel(R) Core(TM) i9-14900HX
+Reproduce with `./build-release/catalog_bench <tle-file>`.
+
 ## References
 
 SGP4 follows the reference implementation in Vallado, Crawford, Hujsak, and Kelso,

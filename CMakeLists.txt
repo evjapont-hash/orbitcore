@@ -13,7 +13,8 @@ add_library(orbitcore
   src/time.cpp
   src/frames.cpp
   src/tle.cpp
-  src/sgp4.cpp)
+  src/sgp4.cpp
+  src/catalog.cpp)
 target_include_directories(orbitcore PUBLIC include)
 target_compile_features(orbitcore PUBLIC cxx_std_20)
 
@@ -31,13 +32,17 @@ endif()
 add_executable(orbit_cli tools/orbit_cli.cpp)
 target_link_libraries(orbit_cli PRIVATE orbitcore)
 
+add_executable(catalog_bench tools/catalog_bench.cpp)
+target_link_libraries(catalog_bench PRIVATE orbitcore)
+
 if(ORBITCORE_BUILD_TESTS)
   enable_testing()
   add_executable(orbitcore_tests
     tests/test_main.cpp
     tests/test_time_frames.cpp
     tests/test_tle.cpp
-    tests/test_sgp4_vallado.cpp)
+    tests/test_sgp4_vallado.cpp
+    tests/test_catalog.cpp)
   target_include_directories(orbitcore_tests PRIVATE tests)
   target_link_libraries(orbitcore_tests PRIVATE orbitcore)
   target_compile_definitions(orbitcore_tests PRIVATE
