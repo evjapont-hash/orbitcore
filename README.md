@@ -1,5 +1,7 @@
 # orbitcore
 
+**Live demo: https://evjapont-hash.github.io/orbitcore/** (rebuilt every 6 hours with fresh public element sets)
+
 C++20 orbital mechanics core for a real-time LEO situational-awareness display:
 TLE ingest, near-Earth SGP4, frame transforms (TEME/ECEF/ENU/NED/RTN), and (planned)
 conjunction assessment. Uses only unclassified public element data.
@@ -19,6 +21,8 @@ conjunction assessment. Uses only unclassified public element data.
 | TLE parser | done, tested (OMM JSON: planned) |
 | Near-Earth SGP4 | done, matches the Vallado reference set (9 satellites, 0 mismatches) |
 | Validation | runs in CI, see [docs/VALIDATION.md](docs/VALIDATION.md) |
+| WebAssembly build (embind) | done, matches the native build to float32 precision |
+| Web viewer (WebGL2) | done, deployed to GitHub Pages with scheduled data refresh |
 | Conjunction assessment | planned |
 
 Limitations: near-Earth only (period < 225 min); public TLE accuracy is about 1 km at epoch.

@@ -2,7 +2,8 @@
 //
 //   node wasm/test_node.cjs examples/iss_2008.tle [catalog.tle]
 //
-// 1) Correctness: ISS 2008 at epoch + 10 min must match the native orbit_cli to float32 precision.
+// 1) Correctness: ISS 2008 at epoch + 10 min must match the native orbit_cli to float32 precision,
+//    including the describe() and track() results the viewer uses.
 // 2) Speed (if a catalog file is given): time a full-catalog propagation in WebAssembly.
 const fs = require('fs');
 const path = require('path');
@@ -17,12 +18,18 @@ async function main() {
   }
   const oc = await createOrbitcore();
   let ok = true;
+  const check = (label, pass) => {
+    console.log(`  ${label} -> ${pass ? 'PASS' : 'FAIL'}`);
+    if (!pass) ok = false;
+  };
 
   // --- 1) correctness against the native tool -------------------------------------------
   const iss = new oc.Engine();
   iss.loadTle(fs.readFileSync(issPath, 'utf8'));
   // TLE epoch is 2008 day 264.51782528 = JD 2454466.5 + 263.51782528; look 10 minutes later.
-  const failures = iss.propagate(2454466.5, 263.51782528 + 10 / 1440);
+  const jdDay = 2454466.5;
+  const jdFrac = 263.51782528 + 10 / 1440;
+  const failures = iss.propagate(jdDay, jdFrac);
   const p = iss.positions();
   const expected = [4550.07523, 3253.056114, 3728.338224]; // native orbit_cli, t = 10 min (km)
   let maxErr = 0;
@@ -30,8 +37,28 @@ async function main() {
   console.log(`ISS ${iss.name(0)} (NORAD ${iss.satnum(0)}), failures: ${failures}`);
   console.log(`  wasm:   ${Array.from(p).map((v) => v.toFixed(3)).join(', ')} km`);
   console.log(`  native: ${expected.map((v) => v.toFixed(3)).join(', ')} km`);
-  console.log(`  max difference ${maxErr.toExponential(2)} km -> ${maxErr < 0.01 ? 'PASS' : 'FAIL'}`);
-  if (!(maxErr < 0.01)) ok = false;
+  check(`positions: max difference ${maxErr.toExponential(2)} km`, maxErr < 0.01);
+
+  // describe(): geodetic position, speed, and orbit shape (layout is documented in engine.hpp)
+  const described = iss.describe(0, jdDay, jdFrac);
+  const info = iss.info();
+  console.log(`  describe: lat ${info[8].toFixed(4)} deg, lon ${info[9].toFixed(4)} deg, alt ${info[10].toFixed(3)} km, ` +
+              `speed ${info[7].toFixed(5)} km/s, period ${info[11].toFixed(2)} min, ` +
+              `perigee/apogee ${info[14].toFixed(1)}/${info[15].toFixed(1)} km, age ${info[16].toFixed(5)} d`);
+  check('describe: lat/lon/alt/speed match native',
+        described && Math.abs(info[8] - 33.854631) < 1e-3 && Math.abs(info[9] + 153.126294) < 1e-3 &&
+        Math.abs(info[10] - 350.520963) < 0.01 && Math.abs(info[7] - 7.705863) < 1e-4);
+  check('describe: element-set age is 10 minutes', Math.abs(info[16] - 10 / 1440) < 1e-9);
+
+  // track(): one orbit of positions, all finite and at LEO radius
+  const valid = iss.track(0, jdDay, jdFrac, 92, 50);
+  const tp = iss.trackPoints();
+  let radiusOk = tp.length === 150;
+  for (let j = 0; j < 50 && radiusOk; j++) {
+    const r = Math.hypot(tp[3 * j], tp[3 * j + 1], tp[3 * j + 2]);
+    radiusOk = r > 6700 && r < 6800;
+  }
+  check(`track: ${valid} valid points, ${tp.length} floats, LEO radii`, valid === 50 && radiusOk);
   iss.delete();
 
   // --- 2) speed on a real catalog --------------------------------------------------------
@@ -43,13 +70,13 @@ async function main() {
     const loadMs = performance.now() - t;
     console.log(`\nLoaded ${loaded} objects in ${loadMs.toFixed(1)} ms (skipped ${engine.skippedDeepSpace()} deep-space)`);
 
-    const jdFrac = Date.now() / 86400000; // JD = 2440587.5 + unix days
-    engine.propagate(2440587.5, jdFrac); // warm-up
+    const nowFrac = Date.now() / 86400000; // JD = 2440587.5 + unix days
+    engine.propagate(2440587.5, nowFrac); // warm-up
     const times = [];
     let lastFailures = 0;
     for (let k = 0; k < 20; k++) {
       t = performance.now();
-      lastFailures = engine.propagate(2440587.5, jdFrac + k / 1440);
+      lastFailures = engine.propagate(2440587.5, nowFrac + k / 1440);
       times.push(performance.now() - t);
     }
     times.sort((a, b) => a - b);

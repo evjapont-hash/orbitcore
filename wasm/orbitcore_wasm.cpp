@@ -15,6 +15,16 @@ emscripten::val positions_view(const Engine& engine) {
   return emscripten::val(emscripten::typed_memory_view(engine.position_count(), engine.positions()));
 }
 
+// Float64Array view of the describe() result (layout documented in engine.hpp).
+emscripten::val info_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.info_count(), engine.info()));
+}
+
+// Float32Array view of the track() result (x, y, z per point, TEME km).
+emscripten::val track_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.track_size(), engine.track_data()));
+}
+
 }  // namespace
 
 EMSCRIPTEN_BINDINGS(orbitcore) {
@@ -28,5 +38,9 @@ EMSCRIPTEN_BINDINGS(orbitcore) {
       .function("name", &Engine::name)
       .function("gmst", &Engine::gmst)
       .function("propagate", &Engine::propagate)
-      .function("positions", &positions_view);
+      .function("positions", &positions_view)
+      .function("describe", &Engine::describe)
+      .function("info", &info_view)
+      .function("track", &Engine::track)
+      .function("trackPoints", &track_view);
 }

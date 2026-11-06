@@ -53,8 +53,9 @@ else()
       tests/test_time_frames.cpp
       tests/test_tle.cpp
       tests/test_sgp4_vallado.cpp
-      tests/test_catalog.cpp)
-    target_include_directories(orbitcore_tests PRIVATE tests)
+      tests/test_catalog.cpp
+      tests/test_engine.cpp)
+    target_include_directories(orbitcore_tests PRIVATE tests wasm)
     target_link_libraries(orbitcore_tests PRIVATE orbitcore)
     target_compile_definitions(orbitcore_tests PRIVATE
       ORBITCORE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")

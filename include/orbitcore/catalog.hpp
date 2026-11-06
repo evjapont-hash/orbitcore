@@ -28,6 +28,12 @@ class Catalog {
   std::size_t size() const { return propagators_.size(); }
   const std::string& name(std::size_t i) const { return names_[i]; }
   int satnum(std::size_t i) const { return propagators_[i].elements().satnum; }
+  const ElementSet& elements(std::size_t i) const { return propagators_[i].elements(); }
+
+  // Propagates a single object to the instant `t` (UTC).
+  PropagationResult propagate_one(std::size_t i, JulianDate t) const {
+    return propagators_[i].propagate_to(t);
+  }
 
   // Propagates every object to the instant `t` (UTC). Writes TEME positions in km into
   // `out_xyz_km`, which must hold 3 * size() doubles (x0,y0,z0,x1,y1,z1,...).
