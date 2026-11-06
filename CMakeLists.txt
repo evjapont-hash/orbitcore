@@ -29,23 +29,35 @@ if(ORBITCORE_SANITIZE AND NOT MSVC)
   target_link_options(orbitcore PUBLIC -fsanitize=address,undefined)
 endif()
 
-add_executable(orbit_cli tools/orbit_cli.cpp)
-target_link_libraries(orbit_cli PRIVATE orbitcore)
+if(EMSCRIPTEN)
+  # Browser build: orbitcore compiled to WebAssembly with JavaScript bindings (embind).
+  add_executable(orbitcore_wasm wasm/orbitcore_wasm.cpp)
+  target_link_libraries(orbitcore_wasm PRIVATE orbitcore)
+  target_link_options(orbitcore_wasm PRIVATE
+    -lembind
+    -sMODULARIZE=1
+    -sEXPORT_NAME=createOrbitcore
+    -sALLOW_MEMORY_GROWTH=1
+    -sENVIRONMENT=web,worker,node)
+else()
+  add_executable(orbit_cli tools/orbit_cli.cpp)
+  target_link_libraries(orbit_cli PRIVATE orbitcore)
 
-add_executable(catalog_bench tools/catalog_bench.cpp)
-target_link_libraries(catalog_bench PRIVATE orbitcore)
+  add_executable(catalog_bench tools/catalog_bench.cpp)
+  target_link_libraries(catalog_bench PRIVATE orbitcore)
 
-if(ORBITCORE_BUILD_TESTS)
-  enable_testing()
-  add_executable(orbitcore_tests
-    tests/test_main.cpp
-    tests/test_time_frames.cpp
-    tests/test_tle.cpp
-    tests/test_sgp4_vallado.cpp
-    tests/test_catalog.cpp)
-  target_include_directories(orbitcore_tests PRIVATE tests)
-  target_link_libraries(orbitcore_tests PRIVATE orbitcore)
-  target_compile_definitions(orbitcore_tests PRIVATE
-    ORBITCORE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
-  add_test(NAME orbitcore_tests COMMAND orbitcore_tests)
+  if(ORBITCORE_BUILD_TESTS)
+    enable_testing()
+    add_executable(orbitcore_tests
+      tests/test_main.cpp
+      tests/test_time_frames.cpp
+      tests/test_tle.cpp
+      tests/test_sgp4_vallado.cpp
+      tests/test_catalog.cpp)
+    target_include_directories(orbitcore_tests PRIVATE tests)
+    target_link_libraries(orbitcore_tests PRIVATE orbitcore)
+    target_compile_definitions(orbitcore_tests PRIVATE
+      ORBITCORE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    add_test(NAME orbitcore_tests COMMAND orbitcore_tests)
+  endif()
 endif()
