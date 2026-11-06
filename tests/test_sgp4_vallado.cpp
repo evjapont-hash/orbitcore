@@ -97,9 +97,9 @@ TEST_CASE(sgp4_rejects_deep_space) {
 TEST_CASE(sgp4_vallado_vectors) {
   const std::string dir = ORBITCORE_TEST_DATA_DIR;
   const auto elements = read_elements(dir + "/SGP4-VER.TLE");
-  const auto expected = read_expected(dir + "/tcppver.out");
+  const auto expected = read_expected(dir + "/tmatverDec2015.out");
   if (elements.empty() || expected.empty())
-    SKIP("tests/data/SGP4-VER.TLE and tcppver.out not found; see tests/data/README.md");
+    SKIP("tests/data/SGP4-VER.TLE and tmatverDec2015.out not found; see tests/data/README.md");
 
   int compared = 0, deep_space = 0, mismatched = 0;
   for (const auto& [satnum, rows] : expected) {

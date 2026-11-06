@@ -1,3 +1,10 @@
+// Near-Earth SGP4 propagator.
+//
+// The algorithm and coefficient names follow the reference implementation in:
+//   Vallado, D. A., Crawford, P., Hujsak, R., and Kelso, T. S.,
+//   "Revisiting Spacetrack Report #3", AIAA 2006-6753.
+//   Source code and test cases: https://celestrak.org/publications/AIAA/2006-6753/
+// Deep-space (SDP4) terms are not implemented.
 #include "orbitcore/sgp4.hpp"
 
 #include <cmath>
