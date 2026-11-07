@@ -5,6 +5,7 @@
 // every object as a point sprite in a single draw call. Scene units are Earth radii. The frame
 // is TEME (inertial), so the Earth is rotated by GMST while satellites are drawn as propagated.
 import { lookAt, multiply, perspective, rotateZ } from './mat4.js';
+import { pickNearest } from './picking.js';
 
 const EARTH_RADIUS_KM = 6378.137; // WGS-84 equatorial radius; only used to scale the scene
 const JD_UNIX_EPOCH = 2440587.5; // Julian date of 1970-01-01 00:00 UTC
@@ -49,10 +50,13 @@ void main() {
 const POINTS_FRAG = `#version 300 es
 precision mediump float;
 in vec4 vColor;
+uniform float uRing;               // 1.0 draws a hollow ring (selection marker)
 out vec4 outColor;
 void main() {
   vec2 c = gl_PointCoord - vec2(0.5);
-  if (dot(c, c) > 0.25) discard;   // round points
+  float r2 = dot(c, c);
+  if (r2 > 0.25) discard;          // round points
+  if (uRing > 0.5 && r2 < 0.16) discard;
   outColor = vColor;
 }`;
 
@@ -177,7 +181,6 @@ async function main() {
     const info = await fetch('build-info.json');
     if (info.ok) buildInfo = await info.json();
   } catch (_) { /* running locally */ }
-
   const text = await response.text();
   const count = engine.loadTle(text);
   const skippedDeepSpace = engine.skippedDeepSpace();
@@ -185,6 +188,8 @@ async function main() {
 
   // Classify by name (CelesTrak marks debris "DEB" and rocket bodies "R/B") and pick colors.
   const colors = new Uint8Array(count * 4);
+  const kind = new Uint8Array(count); // 0 active, 1 debris, 2 rocket body
+  const KIND_LABELS = ['Active satellite', 'Debris', 'Rocket body'];
   const tally = { active: 0, debris: 0, rocket: 0 };
   const COLOR_ACTIVE = [80, 200, 255, 255];
   const COLOR_DEBRIS = [255, 150, 60, 255];
@@ -192,8 +197,8 @@ async function main() {
   for (let i = 0; i < count; i++) {
     const name = engine.name(i);
     let color = COLOR_ACTIVE;
-    if (name.endsWith(' DEB')) { color = COLOR_DEBRIS; tally.debris++; }
-    else if (name.endsWith(' R/B')) { color = COLOR_ROCKET; tally.rocket++; }
+    if (name.endsWith(' DEB')) { color = COLOR_DEBRIS; kind[i] = 1; tally.debris++; }
+    else if (name.endsWith(' R/B')) { color = COLOR_ROCKET; kind[i] = 2; tally.rocket++; }
     else { tally.active++; }
     colors.set(color, i * 4);
   }
@@ -206,6 +211,7 @@ async function main() {
   const pointsViewProj = gl.getUniformLocation(pointsProgram, 'uViewProj');
   const pointsScale = gl.getUniformLocation(pointsProgram, 'uScale');
   const pointsSize = gl.getUniformLocation(pointsProgram, 'uPointSize');
+  const pointsRing = gl.getUniformLocation(pointsProgram, 'uRing');
 
   const sphere = sphereMesh(36, 72, 0.997);
   const earth = meshObject(sphere.vertices, sphere.indices);
@@ -228,6 +234,33 @@ async function main() {
   gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 0, 0);
   gl.bindVertexArray(null);
 
+  // Selection marker: one point (a hollow ring) drawn over the selected object
+  const markerPosBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, markerPosBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, 3 * 4, gl.DYNAMIC_DRAW);
+  const markerVao = gl.createVertexArray();
+  gl.bindVertexArray(markerVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, markerPosBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  staticBuffer(gl.ARRAY_BUFFER, new Uint8Array([255, 255, 255, 255]));
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+  gl.bindVertexArray(null);
+
+  // Orbit track of the selected object: a line strip, rebuilt every frame (inertial TEME frame)
+  const TRACK_POINTS = 180;
+  const trackScaled = new Float32Array(TRACK_POINTS * 3);
+  const trackBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, trackBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, trackScaled.byteLength, gl.DYNAMIC_DRAW);
+  const trackVao = gl.createVertexArray();
+  gl.bindVertexArray(trackVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, trackBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
   // Legend
   const legendRow = (rgba, label, n) =>
     `<div><span class="dot" style="background:rgb(${rgba[0]},${rgba[1]},${rgba[2]})"></span>` +
@@ -239,24 +272,29 @@ async function main() {
 
   // Camera (orbits the Earth's centre; z is up)
   const cam = { yaw: 0.6, pitch: 0.35, dist: 3.2 }; // dist in Earth radii
-  let dragging = false, lastX = 0, lastY = 0;
+  let dragging = false, moved = false, lastX = 0, lastY = 0, downX = 0, downY = 0;
   canvas.addEventListener('pointerdown', (e) => {
-    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    dragging = true; moved = false;
+    lastX = downX = e.clientX; lastY = downY = e.clientY;
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener('pointermove', (e) => {
     if (!dragging) return;
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) moved = true;
     cam.yaw -= (e.clientX - lastX) * 0.006;
     cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch + (e.clientY - lastY) * 0.006));
     lastX = e.clientX; lastY = e.clientY;
   });
-  const stopDrag = () => { dragging = false; };
-  canvas.addEventListener('pointerup', stopDrag);
-  canvas.addEventListener('pointercancel', stopDrag);
+  canvas.addEventListener('pointerup', (e) => {
+    if (dragging && !moved) handleClick(e.clientX, e.clientY); // a click, not a drag
+    dragging = false;
+  });
+  canvas.addEventListener('pointercancel', () => { dragging = false; });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
     cam.dist = Math.max(1.15, Math.min(30, cam.dist * Math.exp(e.deltaY * 0.001)));
   }, { passive: false });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') select(-1); });
 
   // Simulation clock
   let simMs = Date.now();
@@ -279,6 +317,68 @@ async function main() {
   });
   refreshButtons();
 
+  // Selection
+  let selected = -1;
+  let selectedPeriodMin = 95;
+  let lastViewProj = null, lastEye = null; // from the most recent frame, used for picking
+  const esc = (text) => text.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const fmtLat = (v) => `${Math.abs(v).toFixed(2)}° ${v >= 0 ? 'N' : 'S'}`;
+  const fmtLon = (v) => `${Math.abs(v).toFixed(2)}° ${v >= 0 ? 'E' : 'W'}`;
+
+  function handleClick(clientX, clientY) {
+    if (!lastViewProj) return;
+    const rect = canvas.getBoundingClientRect();
+    select(pickNearest({
+      positions: engine.positions(), count, scale: 1 / EARTH_RADIUS_KM,
+      viewProj: lastViewProj, eye: lastEye,
+      width: canvas.clientWidth, height: canvas.clientHeight,
+      x: clientX - rect.left, y: clientY - rect.top, radius: 12,
+    }));
+  }
+
+  function select(index) {
+    selected = index;
+    updateInfoPanel();
+  }
+
+  // Details of the selected object. Every number comes from the C++ engine (Engine.describe).
+  function updateInfoPanel() {
+    const panel = $('info');
+    if (selected < 0) { panel.style.display = 'none'; return; }
+    engine.describe(selected, JD_UNIX_EPOCH, simMs / MS_PER_DAY);
+    const d = engine.info();
+    if (d[11] > 0) selectedPeriodMin = d[11];
+    const age = d[16];
+    const ageText = `${Math.abs(age).toFixed(2)} d ${age >= 0 ? 'old' : 'before epoch'}`;
+    const ageClass = Math.abs(age) > 3 ? ' class="warn"' : '';
+    const lines = [
+      '<span class="head">SELECTED OBJECT</span>',
+      '',
+      `Name          ${esc(engine.name(selected))}`,
+      `NORAD ID      ${engine.satnum(selected)}`,
+      `Type          ${KIND_LABELS[kind[selected]]}`,
+    ];
+    if (d[0] === 1) {
+      lines.push(
+        `Altitude      ${d[10].toFixed(1)} km`,
+        `Speed         ${d[7].toFixed(3)} km/s (TEME)`,
+        `Sub-sat point ${fmtLat(d[8])}  ${fmtLon(d[9])}`);
+    } else {
+      lines.push('<span class="warn">Propagation failed at this time</span>');
+    }
+    lines.push(
+      `Period        ${d[11].toFixed(1)} min`,
+      `Inclination   ${d[12].toFixed(2)}°`,
+      `Eccentricity  ${d[13].toFixed(5)}`,
+      `Perigee/apog. ${d[14].toFixed(0)} / ${d[15].toFixed(0)} km (mean)`,
+      `Element age   <span${ageClass}>${ageText}</span>`,
+      '',
+      'Esc or click empty space to clear');
+    panel.innerHTML = lines.join('\n');
+    panel.style.display = 'block';
+  }
+
   // HUD
   let propagateMs = 0, fps = 0;
   function hudText() {
@@ -293,7 +393,8 @@ async function main() {
       `Objects       ${count.toLocaleString()} propagated (SGP4, WGS-72)`,
       `Skipped       ${skippedDeepSpace.toLocaleString()} deep-space`,
       `Data          CelesTrak GP, ${buildInfo ? 'fetched ' + buildInfo.catalogFetchedUtc : 'file dated ' + (fileDate || 'unknown')}`,
-      `Build         ${buildInfo ? buildInfo.commit : 'local'}`,      '',
+      `Build         ${buildInfo ? buildInfo.commit : 'local'}`,
+      '',
       `Propagate     ${propagateMs.toFixed(1)} ms (WebAssembly, f64)`,
       `Render        ${fps.toFixed(0)} fps`,
       `Camera        ${(cam.dist * EARTH_RADIUS_KM).toFixed(0)} km from Earth centre`,
@@ -334,6 +435,8 @@ async function main() {
     const view = lookAt(eye, [0, 0, 0], [0, 0, 1]);
     const viewProj = multiply(perspective(0.8, width / height, 0.05, 200), view);
     const earthMvp = multiply(viewProj, rotateZ(gmst)); // Earth-fixed -> TEME
+    lastViewProj = viewProj;
+    lastEye = [eye[0], eye[1], eye[2]];
 
     gl.clearColor(0.02, 0.03, 0.06, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -357,11 +460,38 @@ async function main() {
     gl.uniformMatrix4fv(pointsViewProj, false, viewProj);
     gl.uniform1f(pointsScale, 1 / EARTH_RADIUS_KM);
     gl.uniform1f(pointsSize, 2 * dpr);
+    gl.uniform1f(pointsRing, 0);
     gl.bindVertexArray(pointsVao);
     gl.drawArrays(gl.POINTS, 0, count);
 
+    if (selected >= 0) {
+      // Orbit track: one orbital period from now, in the inertial frame
+      engine.track(selected, JD_UNIX_EPOCH, jdFrac, selectedPeriodMin, TRACK_POINTS);
+      const tp = engine.trackPoints();
+      for (let k = 0; k < trackScaled.length; k++) trackScaled[k] = tp[k] / EARTH_RADIUS_KM;
+      gl.bindBuffer(gl.ARRAY_BUFFER, trackBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, trackScaled);
+      gl.useProgram(meshProgram);
+      gl.uniformMatrix4fv(meshMvp, false, viewProj);
+      gl.uniform4f(meshColor, 1.0, 0.82, 0.3, 0.9);
+      gl.bindVertexArray(trackVao);
+      gl.drawArrays(gl.LINE_STRIP, 0, TRACK_POINTS);
+
+      // Selection ring on the object itself
+      gl.bindBuffer(gl.ARRAY_BUFFER, markerPosBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, engine.positions().subarray(3 * selected, 3 * selected + 3));
+      gl.useProgram(pointsProgram);
+      gl.uniformMatrix4fv(pointsViewProj, false, viewProj);
+      gl.uniform1f(pointsScale, 1 / EARTH_RADIUS_KM);
+      gl.uniform1f(pointsSize, 14 * dpr);
+      gl.uniform1f(pointsRing, 1);
+      gl.bindVertexArray(markerVao);
+      gl.drawArrays(gl.POINTS, 0, 1);
+    }
+
     if (now - lastHud > 250) {
       $('hud').textContent = hudText();
+      if (selected >= 0) updateInfoPanel();
       lastHud = now;
     }
     requestAnimationFrame(frame);

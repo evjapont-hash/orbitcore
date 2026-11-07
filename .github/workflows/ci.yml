@@ -14,3 +14,7 @@ jobs:
         run: cmake --build build -j
       - name: Test
         run: ctest --test-dir build --output-on-failure -V
+      - name: JavaScript tests
+        run: |
+          node web/mat4.test.mjs
+          node web/picking.test.mjs
