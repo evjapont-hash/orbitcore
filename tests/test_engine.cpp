@@ -78,3 +78,42 @@ TEST_CASE(engine_track) {
   CHECK(engine.track(9, kEpochDay, t, 92.0, 10) == 0);
   CHECK(engine.track_size() == 30);
 }
+
+TEST_CASE(engine_station_visibility) {
+  Engine engine;
+  engine.load_tle(kIssText);
+  const double t = kEpochFrac + 10.0 / 1440.0;
+  engine.propagate(kEpochDay, t);
+  engine.describe(0, kEpochDay, t);
+  const double lat = engine.info()[8], lon = engine.info()[9];  // sub-satellite point
+
+  CHECK(engine.add_station(lat, lon, 0.0, 10.0) == 0);           // directly under the ISS
+  CHECK(engine.add_station(-lat, lon + 180.0, 0.0, 10.0) == 1);  // opposite side of the Earth
+  CHECK(engine.station_count() == 2);
+  engine.update_visibility(kEpochDay, t);
+  CHECK(engine.visible_count(0) == 1);
+  CHECK(engine.visible_count(1) == 0);
+  CHECK(engine.visibility_size() == 1);
+  CHECK(engine.visibility()[0] == 1);  // bit 0 only
+
+  CHECK(engine.look(0, 0, kEpochDay, t));
+  CHECK_NEAR(engine.look_info()[1], 90.0, 0.5);    // elevation: the ISS is overhead
+  CHECK_NEAR(engine.look_info()[2], 350.52, 0.5);  // range is about its altitude, km
+  CHECK(engine.look(1, 0, kEpochDay, t));
+  CHECK(engine.look_info()[1] < 0.0);              // below the horizon from the far side
+  CHECK(!engine.look(5, 0, kEpochDay, t));         // no such station
+  CHECK(!engine.look(0, 3, kEpochDay, t));         // no such object
+
+  engine.clear_stations();
+  CHECK(engine.station_count() == 0);
+  engine.update_visibility(kEpochDay, t);
+  CHECK(engine.visibility()[0] == 0);
+}
+
+TEST_CASE(engine_station_limit) {
+  Engine engine;
+  engine.load_tle(kIssText);
+  for (int i = 0; i < 8; ++i) CHECK(engine.add_station(10.0 * i, 0.0, 0.0, 5.0) == i);
+  CHECK(engine.add_station(0.0, 0.0, 0.0, 5.0) == -1);  // only 8 stations (one bit each)
+  CHECK(engine.station_count() == 8);
+}

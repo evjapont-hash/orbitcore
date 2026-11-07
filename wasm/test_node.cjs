@@ -3,7 +3,7 @@
 //   node wasm/test_node.cjs examples/iss_2008.tle [catalog.tle]
 //
 // 1) Correctness: ISS 2008 at epoch + 10 min must match the native orbit_cli to float32 precision,
-//    including the describe() and track() results the viewer uses.
+//    including the describe(), track() and ground-station visibility results the viewer uses.
 // 2) Speed (if a catalog file is given): time a full-catalog propagation in WebAssembly.
 const fs = require('fs');
 const path = require('path');
@@ -59,6 +59,22 @@ async function main() {
     radiusOk = r > 6700 && r < 6800;
   }
   check(`track: ${valid} valid points, ${tp.length} floats, LEO radii`, valid === 50 && radiusOk);
+
+  // stations: one directly under the ISS (must see it) and one on the far side (must not)
+  const subLat = info[8], subLon = info[9];
+  const s0 = iss.addStation(subLat, subLon, 0, 10);
+  const s1 = iss.addStation(-subLat, subLon + 180, 0, 10);
+  iss.propagate(jdDay, jdFrac);
+  iss.updateVisibility(jdDay, jdFrac);
+  const flags = iss.visibility();
+  const seen = iss.look(0, 0, jdDay, jdFrac);
+  const look = iss.lookInfo();
+  console.log(`  stations: overhead el ${look[1].toFixed(2)} deg, range ${look[2].toFixed(1)} km; ` +
+              `visible counts ${iss.visibleCount(0)} / ${iss.visibleCount(1)}; flags ${flags[0]}`);
+  check('stations: overhead station sees the ISS, far-side station does not',
+        s0 === 0 && s1 === 1 && seen && flags.length === 1 && flags[0] === 1 &&
+        iss.visibleCount(0) === 1 && iss.visibleCount(1) === 0 && look[1] > 89.5);
+  iss.clearStations();
   iss.delete();
 
   // --- 2) speed on a real catalog --------------------------------------------------------

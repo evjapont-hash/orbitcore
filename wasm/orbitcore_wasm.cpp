@@ -25,6 +25,16 @@ emscripten::val track_view(const Engine& engine) {
   return emscripten::val(emscripten::typed_memory_view(engine.track_size(), engine.track_data()));
 }
 
+// Uint8Array view of the visibility flags (one byte per object; bit s = visible from station s).
+emscripten::val visibility_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.visibility_size(), engine.visibility()));
+}
+
+// Float64Array view of the look() result: azimuth deg, elevation deg, range km.
+emscripten::val look_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.look_info_count(), engine.look_info()));
+}
+
 }  // namespace
 
 EMSCRIPTEN_BINDINGS(orbitcore) {
@@ -42,5 +52,13 @@ EMSCRIPTEN_BINDINGS(orbitcore) {
       .function("describe", &Engine::describe)
       .function("info", &info_view)
       .function("track", &Engine::track)
-      .function("trackPoints", &track_view);
+      .function("trackPoints", &track_view)
+      .function("clearStations", &Engine::clear_stations)
+      .function("addStation", &Engine::add_station)
+      .function("stationCount", &Engine::station_count)
+      .function("updateVisibility", &Engine::update_visibility)
+      .function("visibleCount", &Engine::visible_count)
+      .function("visibility", &visibility_view)
+      .function("look", &Engine::look)
+      .function("lookInfo", &look_view);
 }

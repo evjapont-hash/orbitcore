@@ -54,7 +54,8 @@ else()
       tests/test_tle.cpp
       tests/test_sgp4_vallado.cpp
       tests/test_catalog.cpp
-      tests/test_engine.cpp)
+      tests/test_engine.cpp
+      tests/test_visibility.cpp)
     target_include_directories(orbitcore_tests PRIVATE tests wasm)
     target_link_libraries(orbitcore_tests PRIVATE orbitcore)
     target_compile_definitions(orbitcore_tests PRIVATE

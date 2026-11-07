@@ -5,11 +5,13 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "orbitcore/catalog.hpp"
 #include "orbitcore/frames.hpp"
+#include "orbitcore/visibility.hpp"
 
 namespace orbitcore {
 
@@ -129,6 +131,67 @@ class Engine {
   const float* track_data() const { return track_.data(); }
   std::size_t track_size() const { return track_.size(); }  // number of floats
 
+  // ---- Ground stations -----------------------------------------------------------------
+  static constexpr std::size_t kMaxStations = 8;  // one bit of visibility()[i] per station
+
+  void clear_stations() {
+    stations_.clear();
+    station_visible_.fill(0);
+    visibility_.assign(catalog_.size(), 0);
+  }
+
+  // Adds a station; returns its index, or -1 if kMaxStations are already defined.
+  int add_station(double lat_deg, double lon_deg, double alt_km, double min_elevation_deg) {
+    if (stations_.size() >= kMaxStations) return -1;
+    const Geodetic location{Radians{lat_deg * kDegToRad}, Radians{lon_deg * kDegToRad}, alt_km};
+    stations_.push_back(make_station_frame(location, min_elevation_deg * kDegToRad));
+    return static_cast<int>(stations_.size()) - 1;
+  }
+
+  int station_count() const { return static_cast<int>(stations_.size()); }
+
+  // For the instant of the most recent propagate() call, marks which objects each station
+  // can see: bit s of visibility()[i] is set when object i is at or above station s's
+  // minimum elevation. Call propagate() with the same instant first.
+  void update_visibility(double jd_day, double jd_frac) {
+    visibility_.assign(catalog_.size(), 0);
+    station_visible_.fill(0);
+    const double gmst = gmst_rad({jd_day, jd_frac});
+    for (std::size_t s = 0; s < stations_.size(); ++s) {
+      station_visible_[s] = mark_visible(stations_[s], scratch_.data(), catalog_.size(), gmst,
+                                         static_cast<std::uint8_t>(1u << s), visibility_.data());
+    }
+  }
+
+  int visible_count(int station) const {
+    return (station >= 0 && static_cast<std::size_t>(station) < stations_.size())
+               ? static_cast<int>(station_visible_[static_cast<std::size_t>(station)])
+               : 0;
+  }
+  const std::uint8_t* visibility() const { return visibility_.data(); }
+  std::size_t visibility_size() const { return visibility_.size(); }
+
+  // Azimuth (deg), elevation (deg) and range (km) of one object as seen from one station,
+  // available from look_info() after a successful call. Elevation may be negative (below the
+  // horizon); the object is "visible" only at or above the station's minimum elevation.
+  bool look(int station, int object, double jd_day, double jd_frac) {
+    look_.fill(0.0);
+    if (station < 0 || static_cast<std::size_t>(station) >= stations_.size() || !in_range(object)) {
+      return false;
+    }
+    const JulianDate t{jd_day, jd_frac};
+    const PropagationResult result = catalog_.propagate_one(static_cast<std::size_t>(object), t);
+    if (!result.ok()) return false;
+    const LookAngles angles = look_from_station(stations_[static_cast<std::size_t>(station)],
+                                                result.state.r, gmst_rad(t));
+    look_[0] = angles.azimuth.value * kRadToDeg;
+    look_[1] = angles.elevation.value * kRadToDeg;
+    look_[2] = angles.range_km;
+    return true;
+  }
+  const double* look_info() const { return look_.data(); }
+  std::size_t look_info_count() const { return look_.size(); }
+
  private:
   bool in_range(int i) const { return i >= 0 && static_cast<std::size_t>(i) < catalog_.size(); }
 
@@ -138,6 +201,10 @@ class Engine {
   std::vector<float> positions_;
   std::array<double, kInfoSize> info_{};
   std::vector<float> track_;
+  std::vector<StationFrame> stations_;
+  std::array<std::size_t, kMaxStations> station_visible_{};
+  std::vector<std::uint8_t> visibility_;
+  std::array<double, 3> look_{};
 };
 
 }  // namespace orbitcore
