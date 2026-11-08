@@ -37,6 +37,23 @@
     #info { top: 120px; right: 12px; white-space: pre; min-width: 300px; display: none; }
     #info .head { color: var(--accent); }
     #info .warn { color: #ffb454; }
+    .ok { color: #7dff9b; }
+    .dim { color: var(--dim); }
+    #stations { top: 350px; left: 12px; min-width: 340px; }
+    #stations .head { color: var(--accent); margin-bottom: 4px; }
+    .srow { display: flex; gap: 10px; align-items: baseline; }
+    .srow .name { flex: 1; }
+    .srow button { padding: 0 7px; }
+    .row { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    #station-note { color: var(--dim); margin-top: 6px; min-height: 1.5em; }
+    select {
+      font: inherit;
+      color: var(--text);
+      background: #0e1a2a;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 3px 6px;
+    }
     #controls { bottom: 12px; left: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     #controls .label { color: var(--dim); margin-right: 4px; }
     button {
@@ -68,6 +85,28 @@
   <div id="hud" class="panel"></div>
   <div id="legend" class="panel"></div>
   <div id="info" class="panel"></div>
+  <div id="stations" class="panel">
+    <div class="head">GROUND STATIONS</div>
+    <div id="station-list"></div>
+    <div class="row">
+      <button id="btn-add-station">Add by click</button>
+      <button id="btn-presets">Add presets</button>
+      <button id="btn-clear-stations">Clear</button>
+    </div>
+    <div class="row">
+      <label for="mask-select" class="dim">Min elevation</label>
+      <select id="mask-select">
+        <option value="0">0°</option>
+        <option value="5">5°</option>
+        <option value="10" selected>10°</option>
+        <option value="15">15°</option>
+        <option value="20">20°</option>
+        <option value="30">30°</option>
+      </select>
+      <span class="dim">cones end at 1,000 km altitude</span>
+    </div>
+    <div id="station-note"></div>
+  </div>
   <div id="controls" class="panel">
     <span class="label">Time</span>
     <button id="btn-pause">Pause</button>

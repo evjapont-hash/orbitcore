@@ -58,7 +58,7 @@ jobs:
       - name: Assemble site
         run: |
           mkdir site
-          cp web/index.html web/main.js web/mat4.js web/picking.js site/
+          cp web/index.html web/main.js web/mat4.js web/picking.js web/geometry.js site/
           cp build-wasm/orbitcore_wasm.js build-wasm/orbitcore_wasm.wasm site/
           cp catalog-cache/catalog.tle site/catalog.tle
           printf '{"catalogFetchedUtc": "%s", "commit": "%s"}\n' \

@@ -6,11 +6,11 @@
 // is TEME (inertial), so the Earth is rotated by GMST while satellites are drawn as propagated.
 import { lookAt, multiply, perspective, rotateZ } from './mat4.js';
 import { pickNearest } from './picking.js';
+import { coneLines, geodeticToScene, rayEllipsoid, rotateZVec, sceneToGeodeticSurface, screenRay } from './geometry.js';
 
 const EARTH_RADIUS_KM = 6378.137; // WGS-84 equatorial radius; only used to scale the scene
 const JD_UNIX_EPOCH = 2440587.5; // Julian date of 1970-01-01 00:00 UTC
 const MS_PER_DAY = 86400000;
-const DEG = Math.PI / 180;
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('gl');
@@ -31,6 +31,7 @@ function hideMessage() {
 const POINTS_VERT = `#version 300 es
 layout(location = 0) in vec3 aPos;    // TEME position, km
 layout(location = 1) in vec4 aColor;
+layout(location = 2) in float aFlag;  // non-zero: in view of a ground station
 uniform mat4 uViewProj;
 uniform float uScale;                 // km -> Earth radii
 uniform float uPointSize;
@@ -42,9 +43,10 @@ void main() {
     vColor = vec4(0.0);
     return;
   }
+  bool inView = aFlag > 0.5;
   gl_Position = uViewProj * vec4(aPos * uScale, 1.0);
-  gl_PointSize = uPointSize;
-  vColor = aColor;
+  gl_PointSize = inView ? uPointSize * 1.8 : uPointSize;
+  vColor = inView ? vec4(0.45, 1.0, 0.55, 1.0) : aColor;
 }`;
 
 const POINTS_FRAG = `#version 300 es
@@ -95,16 +97,13 @@ function makeProgram(vertSource, fragSource) {
 // ---------------------------------------------------------------------------------------------
 // Geometry (Earth-fixed, in Earth radii)
 // ---------------------------------------------------------------------------------------------
-function sphereMesh(latSegs, lonSegs, radius) {
+// Latitude/longitude mesh of the WGS-84 ellipsoid, offset by `h` Earth radii (negative = below the surface).
+function ellipsoidMesh(latSegs, lonSegs, h) {
   const verts = [];
   for (let i = 0; i <= latSegs; i++) {
-    const lat = -Math.PI / 2 + (Math.PI * i) / latSegs;
+    const latDeg = -90 + (180 * i) / latSegs;
     for (let j = 0; j <= lonSegs; j++) {
-      const lon = (2 * Math.PI * j) / lonSegs;
-      verts.push(
-        radius * Math.cos(lat) * Math.cos(lon),
-        radius * Math.cos(lat) * Math.sin(lon),
-        radius * Math.sin(lat));
+      verts.push(...geodeticToScene(latDeg, (360 * j) / lonSegs, h));
     }
   }
   const indices = [];
@@ -118,22 +117,19 @@ function sphereMesh(latSegs, lonSegs, radius) {
   return { vertices: new Float32Array(verts), indices: new Uint16Array(indices) };
 }
 
-// Latitude circles and meridians as line segments (pairs of vertices).
-function graticule(latsDeg, lonsDeg, radius) {
+// Geodetic graticule (latitude circles and meridians) on the ellipsoid, as line segments.
+function graticule(latsDeg, lonsDeg) {
   const v = [];
-  const push = (latDeg, lonDeg) => {
-    const lat = latDeg * DEG, lon = lonDeg * DEG;
-    v.push(
-      radius * Math.cos(lat) * Math.cos(lon),
-      radius * Math.cos(lat) * Math.sin(lon),
-      radius * Math.sin(lat));
-  };
   const STEP = 5; // degrees per segment
   for (const lat of latsDeg) {
-    for (let lon = -180; lon < 180; lon += STEP) { push(lat, lon); push(lat, lon + STEP); }
+    for (let lon = -180; lon < 180; lon += STEP) {
+      v.push(...geodeticToScene(lat, lon), ...geodeticToScene(lat, lon + STEP));
+    }
   }
   for (const lon of lonsDeg) {
-    for (let lat = -90; lat < 90; lat += STEP) { push(lat, lon); push(lat + STEP, lon); }
+    for (let lat = -90; lat < 90; lat += STEP) {
+      v.push(...geodeticToScene(lat, lon), ...geodeticToScene(lat + STEP, lon));
+    }
   }
   return new Float32Array(v);
 }
@@ -213,13 +209,13 @@ async function main() {
   const pointsSize = gl.getUniformLocation(pointsProgram, 'uPointSize');
   const pointsRing = gl.getUniformLocation(pointsProgram, 'uRing');
 
-  const sphere = sphereMesh(36, 72, 0.997);
+  const sphere = ellipsoidMesh(36, 72, -0.003);
   const earth = meshObject(sphere.vertices, sphere.indices);
   const minorLats = [-75, -60, -45, -30, -15, 15, 30, 45, 60, 75];
   const minorLons = [];
   for (let lon = -165; lon <= 165; lon += 15) if (lon !== 0) minorLons.push(lon);
-  const minorGrid = meshObject(graticule(minorLats, minorLons, 1.0));
-  const majorGrid = meshObject(graticule([0], [0, 180], 1.0)); // equator + prime/anti meridian
+  const minorGrid = meshObject(graticule(minorLats, minorLons));
+  const majorGrid = meshObject(graticule([0], [0, 180])); // equator + prime/anti meridian
 
   const positionBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -232,6 +228,11 @@ async function main() {
   staticBuffer(gl.ARRAY_BUFFER, colors);
   gl.enableVertexAttribArray(1);
   gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+  const flagsBuffer = gl.createBuffer(); // per-object "in view of a ground station" flags
+  gl.bindBuffer(gl.ARRAY_BUFFER, flagsBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, count, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 1, gl.UNSIGNED_BYTE, false, 0, 0);
   gl.bindVertexArray(null);
 
   // Selection marker: one point (a hollow ring) drawn over the selected object
@@ -261,6 +262,37 @@ async function main() {
   gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
 
+  // Ground stations: markers (points, TEME km) and visibility cones (lines, Earth-fixed)
+  const MAX_STATIONS = 8; // the engine keeps one visibility bit per station
+  const CONE_SPOKES = 24;
+  const VERTS_PER_CONE = CONE_SPOKES * 4; // spokes + rim ring, two vertices per segment
+  const coneData = new Float32Array(MAX_STATIONS * VERTS_PER_CONE * 3);
+  const coneBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, coneBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, coneData.byteLength, gl.DYNAMIC_DRAW);
+  const coneVao = gl.createVertexArray();
+  gl.bindVertexArray(coneVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, coneBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  const stationPositions = new Float32Array(MAX_STATIONS * 3); // rewritten every frame
+  const stationPosBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, stationPosBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, stationPositions.byteLength, gl.DYNAMIC_DRAW);
+  const stationVao = gl.createVertexArray();
+  gl.bindVertexArray(stationVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, stationPosBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  const stationColors = new Uint8Array(MAX_STATIONS * 4);
+  for (let k = 0; k < MAX_STATIONS; k++) stationColors.set([255, 235, 90, 255], 4 * k);
+  staticBuffer(gl.ARRAY_BUFFER, stationColors);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+  gl.bindVertexArray(null);
+
   // Legend
   const legendRow = (rgba, label, n) =>
     `<div><span class="dot" style="background:rgb(${rgba[0]},${rgba[1]},${rgba[2]})"></span>` +
@@ -268,7 +300,9 @@ async function main() {
   $('legend').innerHTML =
     legendRow(COLOR_ACTIVE, 'Active satellites', tally.active) +
     legendRow(COLOR_DEBRIS, 'Debris', tally.debris) +
-    legendRow(COLOR_ROCKET, 'Rocket bodies', tally.rocket);
+    legendRow(COLOR_ROCKET, 'Rocket bodies', tally.rocket) +
+    '<div><span class="dot" style="background:rgb(115,255,140)"></span>In view of a station</div>' +
+    '<div><span class="dot" style="background:rgb(255,235,90)"></span>Ground station</div>';
 
   // Camera (orbits the Earth's centre; z is up)
   const cam = { yaw: 0.6, pitch: 0.35, dist: 3.2 }; // dist in Earth radii
@@ -294,7 +328,7 @@ async function main() {
     e.preventDefault();
     cam.dist = Math.max(1.15, Math.min(30, cam.dist * Math.exp(e.deltaY * 0.001)));
   }, { passive: false });
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') select(-1); });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setPlacing(false); select(-1); } });
 
   // Simulation clock
   let simMs = Date.now();
@@ -328,6 +362,7 @@ async function main() {
 
   function handleClick(clientX, clientY) {
     if (!lastViewProj) return;
+    if (placing) { placeStationAt(clientX, clientY); return; }
     const rect = canvas.getBoundingClientRect();
     select(pickNearest({
       positions: engine.positions(), count, scale: 1 / EARTH_RADIUS_KM,
@@ -372,18 +407,131 @@ async function main() {
       `Inclination   ${d[12].toFixed(2)}°`,
       `Eccentricity  ${d[13].toFixed(5)}`,
       `Perigee/apog. ${d[14].toFixed(0)} / ${d[15].toFixed(0)} km (mean)`,
-      `Element age   <span${ageClass}>${ageText}</span>`,
-      '',
-      'Esc or click empty space to clear');
+      `Element age   <span${ageClass}>${ageText}</span>`);
+    if (stations.length > 0) {
+      lines.push('', '<span class="head">FROM GROUND STATIONS</span>');
+      const jdFrac = simMs / MS_PER_DAY;
+      stations.forEach((station, i) => {
+        if (!engine.look(i, selected, JD_UNIX_EPOCH, jdFrac)) return;
+        const l = engine.lookInfo(); // azimuth deg, elevation deg, range km
+        const inView = l[1] >= minElevationDeg;
+        lines.push(`<span class="${inView ? 'ok' : ''}">${esc(station.name.slice(0, 14).padEnd(14))} ` +
+                   `Az ${l[0].toFixed(1).padStart(5)}° El ${l[1].toFixed(1).padStart(5)}° ` +
+                   `${l[2].toFixed(0).padStart(5)} km ${inView ? '▲' : '·'}</span>`);
+      });
+    }
+    lines.push('', 'Esc or click empty space to clear');
     panel.innerHTML = lines.join('\n');
     panel.style.display = 'block';
   }
+
+  // Ground stations. The engine (C++) decides what each station can see; this code manages the
+  // list, draws the markers and cones, and lets you add stations by clicking on the Earth.
+  const FOV_Y = 0.8; // vertical field of view of the camera, radians
+  const CONE_ALTITUDE_KM = 1000; // cones are cut off at this altitude above the Earth's surface
+  const CONE_SHELL = 1 + CONE_ALTITUDE_KM / EARTH_RADIUS_KM;
+  const PRESETS = [ // approximate public coordinates
+    { name: 'Vandenberg SFB', lat: 34.74, lon: -120.57 },
+    { name: 'Wallops Island', lat: 37.94, lon: -75.47 },
+    { name: 'Svalbard', lat: 78.23, lon: 15.40 },
+    { name: 'Cape Canaveral', lat: 28.49, lon: -80.58 },
+    { name: 'Kwajalein', lat: 9.39, lon: 167.47 },
+    { name: 'Pituffik', lat: 76.53, lon: -68.70 },
+  ];
+  let stations = PRESETS.slice(0, 3).map((p) => ({ ...p, alt: 0 })); // alt: km above the ellipsoid
+  let minElevationDeg = Number($('mask-select').value) || 10;
+  let placing = false;
+  let coneCount = 0;
+  let lastGmst = 0;
+  let lastStationHtml = '';
+  const fmtPlace = (st) =>
+    `${Math.abs(st.lat).toFixed(2)}°${st.lat >= 0 ? 'N' : 'S'} ${Math.abs(st.lon).toFixed(2)}°${st.lon >= 0 ? 'E' : 'W'}`;
+
+  function setNote(text) { $('station-note').textContent = text; }
+
+  function setPlacing(on) {
+    placing = on;
+    canvas.style.cursor = on ? 'crosshair' : '';
+    $('btn-add-station').classList.toggle('active', on);
+    setNote(on ? 'Click the globe to place a station (Esc cancels)' : '');
+  }
+
+  function renderStationList() {
+    const html = stations.length === 0
+      ? '<div class="dim">none: use Add by click or Add presets</div>'
+      : stations.map((st, i) =>
+          `<div class="srow"><span class="name">${esc(st.name)}</span>` +
+          `<span class="dim">${fmtPlace(st)}</span>` +
+          `<span class="ok">${engine.visibleCount(i).toLocaleString()} in view</span>` +
+          `<button data-remove="${i}">×</button></div>`).join('');
+    if (html !== lastStationHtml) {
+      $('station-list').innerHTML = html;
+      lastStationHtml = html;
+    }
+  }
+
+  // Sends the station list to the engine and rebuilds the cones.
+  function syncStations() {
+    engine.clearStations();
+    stations.forEach((st, k) => {
+      engine.addStation(st.lat, st.lon, st.alt, minElevationDeg);
+      coneData.set(
+        coneLines(st.lat, st.lon, st.alt / EARTH_RADIUS_KM, minElevationDeg, CONE_SHELL, CONE_SPOKES),
+        k * VERTS_PER_CONE * 3);
+    });
+    coneCount = stations.length;
+    gl.bindBuffer(gl.ARRAY_BUFFER, coneBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, coneData);
+    needsPropagate = true; // recompute what is in view at the next frame
+    renderStationList();
+    if (selected >= 0) updateInfoPanel();
+  }
+
+  function placeStationAt(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    const dir = screenRay(lastEye, FOV_Y, w / h, ((clientX - rect.left) / w) * 2 - 1, 1 - ((clientY - rect.top) / h) * 2);
+    const hit = rayEllipsoid(lastEye, dir);
+    if (!hit) { setNote('That click missed the Earth. Try again.'); return; }
+    if (stations.length >= MAX_STATIONS) { setPlacing(false); setNote(`Maximum of ${MAX_STATIONS} stations`); return; }
+    const { latDeg, lonDeg } = sceneToGeodeticSurface(rotateZVec(hit, -lastGmst)); // inertial -> Earth-fixed
+    stations.push({ name: `Site ${stations.length + 1}`, lat: latDeg, lon: lonDeg, alt: 0 });
+    setPlacing(false);
+    syncStations();
+  }
+
+  // pointerdown (not click): the list is redrawn as counts change, which could swallow a click
+  $('station-list').addEventListener('pointerdown', (e) => {
+    const target = e.target;
+    if (target && target.dataset && target.dataset.remove !== undefined) {
+      stations.splice(Number(target.dataset.remove), 1);
+      syncStations();
+    }
+  });
+  $('btn-add-station').addEventListener('click', () => setPlacing(!placing));
+  $('btn-presets').addEventListener('click', () => {
+    for (const preset of PRESETS) {
+      if (stations.some((st) => st.name === preset.name)) continue;
+      if (stations.length >= MAX_STATIONS) { setNote(`Maximum of ${MAX_STATIONS} stations`); break; }
+      stations.push({ ...preset, alt: 0 });
+    }
+    syncStations();
+  });
+  $('btn-clear-stations').addEventListener('click', () => { stations = []; syncStations(); });
+  $('mask-select').addEventListener('change', () => {
+    minElevationDeg = Number($('mask-select').value);
+    syncStations();
+  });
+  syncStations();
 
   // HUD
   let propagateMs = 0, fps = 0;
   function hudText() {
     const utc = new Date(simMs).toISOString().slice(0, 19).replace('T', ' ') + 'Z';
     const rate = paused ? 'PAUSED' : `x${scale}`;
+    const flags = engine.visibility();
+    let inView = 0;
+    for (let i = 0; i < flags.length; i++) if (flags[i] !== 0) inView++;
     return [
       'LEO SITUATIONAL AWARENESS',
       '',
@@ -392,6 +540,8 @@ async function main() {
       `Ref frame     TEME (inertial), km`,
       `Objects       ${count.toLocaleString()} propagated (SGP4, WGS-72)`,
       `Skipped       ${skippedDeepSpace.toLocaleString()} deep-space`,
+      `Stations      ${stations.length} (min elevation ${minElevationDeg}°)`,
+      `In view       ${inView.toLocaleString()} objects`,
       `Data          CelesTrak GP, ${buildInfo ? 'fetched ' + buildInfo.catalogFetchedUtc : 'file dated ' + (fileDate || 'unknown')}`,
       `Build         ${buildInfo ? buildInfo.commit : 'local'}`,
       '',
@@ -416,10 +566,14 @@ async function main() {
       engine.propagate(JD_UNIX_EPOCH, jdFrac);
       gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, engine.positions()); // view into WebAssembly memory
+      engine.updateVisibility(JD_UNIX_EPOCH, jdFrac); // which objects each station can see
+      gl.bindBuffer(gl.ARRAY_BUFFER, flagsBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, engine.visibility());
       propagateMs = performance.now() - t0;
       needsPropagate = false;
     }
     const gmst = engine.gmst(JD_UNIX_EPOCH, jdFrac);
+    lastGmst = gmst;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
@@ -433,7 +587,7 @@ async function main() {
     const cp = Math.cos(cam.pitch);
     const eye = [cam.dist * cp * Math.cos(cam.yaw), cam.dist * cp * Math.sin(cam.yaw), cam.dist * Math.sin(cam.pitch)];
     const view = lookAt(eye, [0, 0, 0], [0, 0, 1]);
-    const viewProj = multiply(perspective(0.8, width / height, 0.05, 200), view);
+    const viewProj = multiply(perspective(FOV_Y, width / height, 0.05, 200), view);
     const earthMvp = multiply(viewProj, rotateZ(gmst)); // Earth-fixed -> TEME
     lastViewProj = viewProj;
     lastEye = [eye[0], eye[1], eye[2]];
@@ -456,6 +610,19 @@ async function main() {
     gl.bindVertexArray(majorGrid.vao);
     gl.drawArrays(gl.LINES, 0, majorGrid.count);
 
+    // Visibility cones (Earth-fixed): dim spokes and a brighter rim
+    if (coneCount > 0) {
+      gl.useProgram(meshProgram);
+      gl.uniformMatrix4fv(meshMvp, false, earthMvp);
+      gl.bindVertexArray(coneVao);
+      for (let k = 0; k < coneCount; k++) {
+        gl.uniform4f(meshColor, 0.35, 1.0, 0.55, 0.22);
+        gl.drawArrays(gl.LINES, k * VERTS_PER_CONE, CONE_SPOKES * 2);
+        gl.uniform4f(meshColor, 0.45, 1.0, 0.65, 0.75);
+        gl.drawArrays(gl.LINES, k * VERTS_PER_CONE + CONE_SPOKES * 2, CONE_SPOKES * 2);
+      }
+    }
+
     gl.useProgram(pointsProgram);
     gl.uniformMatrix4fv(pointsViewProj, false, viewProj);
     gl.uniform1f(pointsScale, 1 / EARTH_RADIUS_KM);
@@ -463,6 +630,21 @@ async function main() {
     gl.uniform1f(pointsRing, 0);
     gl.bindVertexArray(pointsVao);
     gl.drawArrays(gl.POINTS, 0, count);
+
+    // Ground station markers (Earth-fixed positions rotated into the inertial frame)
+    if (stations.length > 0) {
+      stations.forEach((st, k) => {
+        const p = rotateZVec(geodeticToScene(st.lat, st.lon, st.alt / EARTH_RADIUS_KM), gmst);
+        stationPositions[3 * k] = p[0] * EARTH_RADIUS_KM;
+        stationPositions[3 * k + 1] = p[1] * EARTH_RADIUS_KM;
+        stationPositions[3 * k + 2] = p[2] * EARTH_RADIUS_KM;
+      });
+      gl.bindBuffer(gl.ARRAY_BUFFER, stationPosBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, stationPositions);
+      gl.uniform1f(pointsSize, 9 * dpr);
+      gl.bindVertexArray(stationVao);
+      gl.drawArrays(gl.POINTS, 0, stations.length);
+    }
 
     if (selected >= 0) {
       // Orbit track: one orbital period from now, in the inertial frame
@@ -491,6 +673,7 @@ async function main() {
 
     if (now - lastHud > 250) {
       $('hud').textContent = hudText();
+      renderStationList();
       if (selected >= 0) updateInfoPanel();
       lastHud = now;
     }
