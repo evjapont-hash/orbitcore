@@ -92,3 +92,34 @@ export function coneLines(latDeg, lonDeg, h, minElDeg, shellRadius, spokes = 24)
   for (let k = 0; k < spokes; k++) out.push(...rim[k], ...rim[(k + 1) % spokes]);
   return Float32Array.from(out);
 }
+
+// Converts GeoJSON lines and polygon outlines ([longitude, latitude] in degrees) into line
+// segments (pairs of vertices) on the WGS-84 surface raised by `h` Earth radii, in Earth-fixed
+// scene units. Accepts LineString, MultiLineString, Polygon, MultiPolygon, GeometryCollection,
+// Feature and FeatureCollection; anything else (points, null geometry) is ignored, as are
+// coordinates that are not finite numbers.
+export function geoJsonToLineSegments(geojson, h = 0) {
+  const out = [];
+  const addLine = (coords) => {
+    for (let i = 0; i + 1 < coords.length; i++) {
+      const a = coords[i], b = coords[i + 1];
+      if (!Number.isFinite(a[0]) || !Number.isFinite(a[1]) || !Number.isFinite(b[0]) || !Number.isFinite(b[1])) continue;
+      out.push(...geodeticToScene(a[1], a[0], h), ...geodeticToScene(b[1], b[0], h));
+    }
+  };
+  const visit = (g) => {
+    if (!g) return;
+    switch (g.type) {
+      case 'FeatureCollection': g.features.forEach(visit); break;
+      case 'Feature': visit(g.geometry); break;
+      case 'GeometryCollection': g.geometries.forEach(visit); break;
+      case 'LineString': addLine(g.coordinates); break;
+      case 'MultiLineString': g.coordinates.forEach(addLine); break;
+      case 'Polygon': g.coordinates.forEach(addLine); break;
+      case 'MultiPolygon': g.coordinates.forEach((polygon) => polygon.forEach(addLine)); break;
+      default: break;
+    }
+  };
+  visit(geojson);
+  return Float32Array.from(out);
+}

@@ -48,4 +48,6 @@ SGP4 follows the reference implementation in Vallado, Crawford, Hujsak, and Kels
 "Revisiting Spacetrack Report #3", AIAA 2006-6753
 (https://celestrak.org/publications/AIAA/2006-6753/).
 
+Coastlines: Natural Earth 1:110m (public domain), https://www.naturalearthdata.com/.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the system design.

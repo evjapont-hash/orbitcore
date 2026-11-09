@@ -6,7 +6,7 @@
 // is TEME (inertial), so the Earth is rotated by GMST while satellites are drawn as propagated.
 import { lookAt, multiply, perspective, rotateZ } from './mat4.js';
 import { pickNearest } from './picking.js';
-import { coneLines, geodeticToScene, rayEllipsoid, rotateZVec, sceneToGeodeticSurface, screenRay } from './geometry.js';
+import { coneLines, geoJsonToLineSegments, geodeticToScene, rayEllipsoid, rotateZVec, sceneToGeodeticSurface, screenRay } from './geometry.js';
 
 const EARTH_RADIUS_KM = 6378.137; // WGS-84 equatorial radius; only used to scale the scene
 const JD_UNIX_EPOCH = 2440587.5; // Julian date of 1970-01-01 00:00 UTC
@@ -177,6 +177,14 @@ async function main() {
     const info = await fetch('build-info.json');
     if (info.ok) buildInfo = await info.json();
   } catch (_) { /* running locally */ }
+
+    // Coastlines (Natural Earth, public domain). Optional: the viewer works without them.
+  let coastline = null;
+  try {
+    const res = await fetch('data/ne_110m_coastline.geojson');
+    if (res.ok) coastline = geoJsonToLineSegments(await res.json(), 0.0008);
+  } catch (_) { /* no coastline data */ }
+
   const text = await response.text();
   const count = engine.loadTle(text);
   const skippedDeepSpace = engine.skippedDeepSpace();
@@ -216,6 +224,7 @@ async function main() {
   for (let lon = -165; lon <= 165; lon += 15) if (lon !== 0) minorLons.push(lon);
   const minorGrid = meshObject(graticule(minorLats, minorLons));
   const majorGrid = meshObject(graticule([0], [0, 180])); // equator + prime/anti meridian
+  const coastGrid = coastline ? meshObject(coastline) : null;
 
   const positionBuffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -544,6 +553,7 @@ async function main() {
       `In view       ${inView.toLocaleString()} objects`,
       `Data          CelesTrak GP, ${buildInfo ? 'fetched ' + buildInfo.catalogFetchedUtc : 'file dated ' + (fileDate || 'unknown')}`,
       `Build         ${buildInfo ? buildInfo.commit : 'local'}`,
+      `Coastlines    ${coastline ? 'Natural Earth 1:110m (public domain)' : 'not loaded'}`,
       '',
       `Propagate     ${propagateMs.toFixed(1)} ms (WebAssembly, f64)`,
       `Render        ${fps.toFixed(0)} fps`,
@@ -609,6 +619,11 @@ async function main() {
     gl.uniform4f(meshColor, 0.45, 0.70, 1.0, 0.8);
     gl.bindVertexArray(majorGrid.vao);
     gl.drawArrays(gl.LINES, 0, majorGrid.count);
+    if (coastGrid) {
+      gl.uniform4f(meshColor, 0.55, 0.78, 0.95, 0.75);
+      gl.bindVertexArray(coastGrid.vao);
+      gl.drawArrays(gl.LINES, 0, coastGrid.count);
+  }
 
     // Visibility cones (Earth-fixed): dim spokes and a brighter rim
     if (coneCount > 0) {

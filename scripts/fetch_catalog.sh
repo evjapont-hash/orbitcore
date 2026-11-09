@@ -18,7 +18,7 @@ trap 'rm -rf "$TMP"' EXIT
 fetch() {  # fetch <group> -> $TMP/<group>.tle, validated
   local group="$1" file="$TMP/$1.tle"
   echo "fetching $group"
-  curl --fail --silent --show-error --retry 3 --retry-delay 15 \
+  curl --fail --silent --show-error --connect-timeout 20 --max-time 60 --retry 3 --retry-delay 15 --retry-all-errors \
        --user-agent "orbitcore-viewer (https://github.com/evjapont-hash/orbitcore)" \
        -o "$file" "$BASE?GROUP=$group&FORMAT=tle"
   local lines ones twos

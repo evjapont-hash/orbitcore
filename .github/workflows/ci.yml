@@ -19,3 +19,4 @@ jobs:
           node web/mat4.test.mjs
           node web/picking.test.mjs
           node web/geometry.test.mjs
+          node web/coastline.test.mjs

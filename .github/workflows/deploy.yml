@@ -19,6 +19,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -31,17 +32,41 @@ jobs:
 
       - name: Restore cached catalog
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: catalog-cache
           key: ${{ steps.bucket.outputs.key }}
 
       - name: Download catalog from CelesTrak
+        id: download
         if: steps.cache.outputs.cache-hit != 'true'
+        continue-on-error: true   # a slow or blocked download must not stop the site from updating
+        timeout-minutes: 10
         run: |
           mkdir -p catalog-cache
           bash scripts/fetch_catalog.sh catalog-cache/catalog.tle
           date -u +'%Y-%m-%d %H:%M UTC' > catalog-cache/fetched.txt
+
+      # Only a successful download is cached, so a fallback never masquerades as fresh data.
+      - name: Save catalog to cache
+        if: steps.cache.outputs.cache-hit != 'true' && steps.download.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: catalog-cache
+          key: ${{ steps.bucket.outputs.key }}
+
+      # If CelesTrak could not be reached, keep the catalog that is already published and say
+      # so in the page's data panel (the HUD shows this text next to "Data").
+      - name: Fall back to the catalog already published
+        if: steps.cache.outputs.cache-hit != 'true' && steps.download.outcome != 'success'
+        run: |
+          echo "::warning::CelesTrak download failed; reusing the catalog from the published site"
+          SITE="https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}"
+          mkdir -p catalog-cache
+          curl --fail --silent --show-error --max-time 120 --retry 3 -o catalog-cache/catalog.tle "$SITE/catalog.tle"
+          curl --fail --silent --show-error --max-time 30 --retry 3 -o previous-build-info.json "$SITE/build-info.json"
+          python3 -c "import json; print(json.load(open('previous-build-info.json'))['catalogFetchedUtc'].split(' (')[0] + ' (reused: CelesTrak unreachable)')" > catalog-cache/fetched.txt
+          cat catalog-cache/fetched.txt
 
       - name: Install Emscripten
         run: |
@@ -57,8 +82,9 @@ jobs:
 
       - name: Assemble site
         run: |
-          mkdir site
+          mkdir -p site/data
           cp web/index.html web/main.js web/mat4.js web/picking.js web/geometry.js site/
+          cp web/data/ne_110m_coastline.geojson site/data/
           cp build-wasm/orbitcore_wasm.js build-wasm/orbitcore_wasm.wasm site/
           cp catalog-cache/catalog.tle site/catalog.tle
           printf '{"catalogFetchedUtc": "%s", "commit": "%s"}\n' \
