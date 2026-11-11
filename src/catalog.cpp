@@ -53,6 +53,14 @@ CatalogLoadStats Catalog::load_tle_text(std::string_view text) {
   return stats;
 }
 
+bool Catalog::add_element_set(std::string name, const ElementSet& elements) {
+  Sgp4 propagator(elements);
+  if (propagator.init_status() != Sgp4Error::None) return false;
+  names_.push_back(std::move(name));
+  propagators_.push_back(std::move(propagator));
+  return true;
+}
+
 void Catalog::replicate(std::size_t copies) {
   const std::size_t n = propagators_.size();
   if (copies <= 1 || n == 0) return;

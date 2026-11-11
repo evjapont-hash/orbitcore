@@ -14,7 +14,8 @@ add_library(orbitcore
   src/frames.cpp
   src/tle.cpp
   src/sgp4.cpp
-  src/catalog.cpp)
+  src/catalog.cpp
+  src/conjunction.cpp)
 target_include_directories(orbitcore PUBLIC include)
 target_compile_features(orbitcore PUBLIC cxx_std_20)
 
@@ -46,6 +47,9 @@ else()
   add_executable(catalog_bench tools/catalog_bench.cpp)
   target_link_libraries(catalog_bench PRIVATE orbitcore)
 
+  add_executable(conjunction_cli tools/conjunction_cli.cpp)
+  target_link_libraries(conjunction_cli PRIVATE orbitcore)
+
   if(ORBITCORE_BUILD_TESTS)
     enable_testing()
     add_executable(orbitcore_tests
@@ -55,7 +59,8 @@ else()
       tests/test_sgp4_vallado.cpp
       tests/test_catalog.cpp
       tests/test_engine.cpp
-      tests/test_visibility.cpp)
+      tests/test_visibility.cpp
+      tests/test_conjunction.cpp)
     target_include_directories(orbitcore_tests PRIVATE tests wasm)
     target_link_libraries(orbitcore_tests PRIVATE orbitcore)
     target_compile_definitions(orbitcore_tests PRIVATE

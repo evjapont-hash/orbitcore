@@ -30,6 +30,12 @@ class Catalog {
   int satnum(std::size_t i) const { return propagators_[i].elements().satnum; }
   const ElementSet& elements(std::size_t i) const { return propagators_[i].elements(); }
 
+    const Sgp4& propagator(std::size_t i) const { return propagators_[i]; }
+
+  // Adds one object directly from an element set (no TLE text needed). Returns false, and
+  // adds nothing, if SGP4 cannot be initialised for it (for example a deep-space orbit).
+  bool add_element_set(std::string name, const ElementSet& elements);
+
   // Propagates a single object to the instant `t` (UTC).
   PropagationResult propagate_one(std::size_t i, JulianDate t) const {
     return propagators_[i].propagate_to(t);
