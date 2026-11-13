@@ -1,10 +1,12 @@
 // conjunction_cli: screen one satellite against a TLE catalog for close approaches.
 //
 //   conjunction_cli <tle-file> --primary NORAD_ID [--hours H | --days D]
-//                   [--threshold-km X] [--max-rows N] [--check-brute-force STEP_S]
+//                   [--threshold-km X] [--hbr-m R] [--max-rows N] [--check-brute-force STEP_S]
 //
-// The window starts now (UTC). --check-brute-force also runs a slow reference search that steps
-// every pair at STEP_S seconds and reports whether it finds exactly the same encounters.
+// The window starts now (UTC). --hbr-m is the combined hard-body radius of the two objects, in
+// metres (default 10), used for the covariance-free collision probabilities. --check-brute-force
+// also runs a slow reference search that steps every pair at STEP_S seconds and reports whether
+// it finds exactly the same encounters.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +17,7 @@
 
 #include "orbitcore/catalog.hpp"
 #include "orbitcore/conjunction.hpp"
+#include "orbitcore/risk.hpp"
 
 using namespace orbitcore;
 
@@ -23,7 +26,7 @@ namespace {
 void print_usage() {
   std::fprintf(stderr,
                "usage: conjunction_cli <tle-file> --primary NORAD_ID [--hours H | --days D]\n"
-               "                       [--threshold-km X] [--max-rows N] [--check-brute-force STEP_S]\n");
+               "                       [--threshold-km X] [--hbr-m R] [--max-rows N] [--check-brute-force STEP_S]\n");
 }
 
 bool parse_number(const char* text, double& out) {
@@ -49,15 +52,18 @@ double elapsed_ms(std::chrono::steady_clock::time_point since) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
 }
 
-void print_table(const Catalog& catalog, const ScreeningResult& result, std::size_t max_rows) {
-  std::printf("%4s  %-23s %9s %10s %9s %9s %9s   %s\n", "#", "TCA (UTC)", "miss[km]", "v_rel[km/s]",
-              "R[km]", "T[km]", "N[km]", "secondary");
+void print_table(const Catalog& catalog, const ScreeningResult& result, std::size_t max_rows, double hbr_km) {
+  std::printf("%4s  %-23s %9s %10s %9s %9s %9s %9s %9s %9s   %s\n", "#", "TCA (UTC)", "miss[km]", "v_rel[km/s]",
+              "R[km]", "T[km]", "N[km]", "Pc_max", "sigma*[km]", "Pc_ceil", "secondary");
   std::size_t row = 0;
   for (const Encounter& e : result.encounters) {
     if (row >= max_rows) { std::printf("  ... %zu more\n", result.encounters.size() - row); break; }
-    std::printf("%4zu  %-23s %9.3f %10.3f %9.3f %9.3f %9.3f   %s (NORAD %05d)\n", ++row, utc_text(e.tca).c_str(),
-                e.miss_distance_km, e.relative_speed_km_s, e.miss_rtn.x, e.miss_rtn.y, e.miss_rtn.z,
-                catalog.name(e.secondary).c_str(), catalog.satnum(e.secondary));
+    const MaxProbability worst = maximum_collision_probability(e.miss_distance_km, hbr_km);
+    const double ceiling = collision_probability_ceiling(e.miss_distance_km, hbr_km);
+    std::printf("%4zu  %-23s %9.3f %10.3f %9.3f %9.3f %9.3f %9.1e %9.2f %9.1e   %s (NORAD %05d)\n", ++row,
+                utc_text(e.tca).c_str(), e.miss_distance_km, e.relative_speed_km_s, e.miss_rtn.x, e.miss_rtn.y,
+                e.miss_rtn.z, worst.probability, worst.sigma_km, ceiling, catalog.name(e.secondary).c_str(),
+                catalog.satnum(e.secondary));
   }
 }
 
@@ -66,7 +72,7 @@ void print_table(const Catalog& catalog, const ScreeningResult& result, std::siz
 int main(int argc, char** argv) {
   std::string path;
   long primary_id = -1;
-  double hours = 24.0, threshold_km = 10.0, brute_step_s = 0.0, max_rows = 40.0;
+  double hours = 24.0, threshold_km = 10.0, brute_step_s = 0.0, max_rows = 40.0, hbr_m = 10.0;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto next_number = [&](double& target) {
@@ -83,12 +89,14 @@ int main(int argc, char** argv) {
     else if (arg == "--hours") { if (!next_number(hours)) return 2; }
     else if (arg == "--days") { if (!next_number(value)) return 2; hours = value * 24.0; }
     else if (arg == "--threshold-km") { if (!next_number(threshold_km)) return 2; }
+    else if (arg == "--hbr-m") { if (!next_number(hbr_m)) return 2; }
     else if (arg == "--max-rows") { if (!next_number(max_rows)) return 2; }
     else if (arg == "--check-brute-force") { if (!next_number(brute_step_s)) return 2; }
     else if (arg.rfind("--", 0) == 0 || !path.empty()) { print_usage(); return 2; }
     else path = arg;
   }
-  if (path.empty() || primary_id < 0 || hours <= 0.0 || threshold_km <= 0.0) { print_usage(); return 2; }
+  if (path.empty() || primary_id < 0 || hours <= 0.0 || threshold_km <= 0.0 || hbr_m <= 0.0) { print_usage(); return 2; }
+  const double hbr_km = hbr_m / 1000.0;
 
   std::ifstream in(path);
   if (!in) { std::fprintf(stderr, "error: cannot open '%s'\n", path.c_str()); return 1; }
@@ -124,10 +132,28 @@ int main(int argc, char** argv) {
               result.stats.objects_screened, result.stats.objects_total - 1, result.encounters.size(), threshold_km);
   std::printf("           %.1f ms, %.2f million SGP4 evaluations\n\n", screen_ms,
               static_cast<double>(result.stats.propagations) / 1e6);
-  print_table(catalog, result, static_cast<std::size_t>(max_rows));
+  print_table(catalog, result, static_cast<std::size_t>(max_rows), hbr_km);
+
+  // Summary of the covariance-free risk numbers (illustrative thresholds, not operational criteria).
+  double largest = 0.0;
+  std::size_t largest_index = 0, over_1e5 = 0, over_1e4 = 0;
+  for (std::size_t i = 0; i < result.encounters.size(); ++i) {
+    const double pc = maximum_collision_probability(result.encounters[i].miss_distance_km, hbr_km).probability;
+    if (pc > largest) { largest = pc; largest_index = i + 1; }
+    if (pc >= 1e-5) ++over_1e5;
+    if (pc >= 1e-4) ++over_1e4;
+  }
+  if (!result.encounters.empty()) {
+    std::printf("\nHard-body radius %.1f m. Largest Pc_max: %.1e (event #%zu). Events with Pc_max >= 1e-5: %zu; >= 1e-4: %zu.\n",
+                hbr_m, largest, largest_index, over_1e5, over_1e4);
+  }
   std::printf("\nR, T, N = the secondary's position relative to the primary, in the primary's radial, in-track and\n"
-              "cross-track axes at the time of closest approach. TLE-based: positions are good to ~1 km at epoch\n"
-              "and degrade with element age, so treat these as a demonstration, not operational screening.\n");
+              "cross-track axes at the time of closest approach.\n"
+              "Pc_max = worst-case collision probability over the SIZE of the position uncertainty (equal in both\n"
+              "directions of the encounter plane); sigma* is the uncertainty at which that worst case occurs.\n"
+              "Pc_ceil = upper bound over ANY uncertainty size and shape (Gaussian). TLEs carry no covariance, so\n"
+              "these are bounds, not predictions. Positions are good to ~1 km at epoch and degrade with element\n"
+              "age: treat all of this as a demonstration of the method, not operational screening.\n");
 
   if (brute_step_s > 0.0) {
     std::printf("\nBrute-force check (every pair, %.2f s steps, no skipping, no radial filter)...\n", brute_step_s);

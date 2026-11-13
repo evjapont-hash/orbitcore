@@ -15,7 +15,8 @@ add_library(orbitcore
   src/tle.cpp
   src/sgp4.cpp
   src/catalog.cpp
-  src/conjunction.cpp)
+  src/conjunction.cpp
+  src/risk.cpp)
 target_include_directories(orbitcore PUBLIC include)
 target_compile_features(orbitcore PUBLIC cxx_std_20)
 
@@ -60,7 +61,8 @@ else()
       tests/test_catalog.cpp
       tests/test_engine.cpp
       tests/test_visibility.cpp
-      tests/test_conjunction.cpp)
+      tests/test_conjunction.cpp
+      tests/test_risk.cpp)
     target_include_directories(orbitcore_tests PRIVATE tests wasm)
     target_link_libraries(orbitcore_tests PRIVATE orbitcore)
     target_compile_definitions(orbitcore_tests PRIVATE
