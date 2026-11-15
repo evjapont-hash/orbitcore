@@ -106,11 +106,12 @@ double safe_advance_seconds(const double r[3], const double v[3], double thresho
   return lo;
 }
 
-ScreeningResult screen_primary(const Catalog& catalog, std::size_t primary, JulianDate start,
-                               double span_minutes, const ScreeningOptions& options) {
-  ScreeningResult result;
+void screen_primary_range(const Catalog& catalog, std::size_t primary, JulianDate start,
+                          double span_minutes, const ScreeningOptions& options, std::size_t first,
+                          std::size_t last, ScreeningResult& result) {
   result.stats.objects_total = catalog.size();
-  if (primary >= catalog.size()) return result;
+  if (primary >= catalog.size()) return;
+  last = std::min(last, catalog.size());
 
   const Sgp4& p = catalog.propagator(primary);
   const double span_s = span_minutes * 60.0;
@@ -118,7 +119,7 @@ ScreeningResult screen_primary(const Catalog& catalog, std::size_t primary, Juli
   const RadialBand pband = radial_band(p.elements());
   const double primary_minutes0 = minutes_between(p.elements().epoch, start);
 
-  for (std::size_t i = 0; i < catalog.size(); ++i) {
+  for (std::size_t i = first; i < last; ++i) {
     if (i == primary) continue;
     const Sgp4& s = catalog.propagator(i);
     if (options.radial_margin_km >= 0.0) {
@@ -160,7 +161,15 @@ ScreeningResult screen_primary(const Catalog& catalog, std::size_t primary, Juli
       for (int k = 0; k < 3; ++k) { r[k] = r1[k]; v[k] = v1[k]; }
     }
   }
-  sort_by_time(result.encounters, start);
+}
+
+void sort_encounters(ScreeningResult& result, JulianDate start) { sort_by_time(result.encounters, start); }
+
+ScreeningResult screen_primary(const Catalog& catalog, std::size_t primary, JulianDate start,
+                               double span_minutes, const ScreeningOptions& options) {
+  ScreeningResult result;
+  screen_primary_range(catalog, primary, start, span_minutes, options, 0, catalog.size(), result);
+  sort_encounters(result, start);
   return result;
 }
 

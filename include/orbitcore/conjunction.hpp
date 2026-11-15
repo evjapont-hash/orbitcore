@@ -60,7 +60,16 @@ struct ScreeningResult {
 double safe_advance_seconds(const double r[3], const double v[3], double threshold_km,
                             double max_accel_km_s2, double max_step_s);
 
-// Screens `catalog[primary]` against every other object for encounters whose closest approach
+// Screens only the secondaries with catalog index in [first, last) (the primary itself is always
+// skipped). Encounters are appended to `result` (unsorted) and its stats are accumulated, so a
+// caller can screen a large catalog in small chunks and stay responsive. Call sort_encounters()
+// once all chunks are done.
+void screen_primary_range(const Catalog& catalog, std::size_t primary, JulianDate start,
+                          double span_minutes, const ScreeningOptions& options, std::size_t first,
+                          std::size_t last, ScreeningResult& result);
+
+// Orders result.encounters by time of closest approach.
+void sort_encounters(ScreeningResult& result, JulianDate start);// Screens `catalog[primary]` against every other object for encounters whose closest approach
 // falls within [start, start + span_minutes].
 ScreeningResult screen_primary(const Catalog& catalog, std::size_t primary, JulianDate start,
                                double span_minutes, const ScreeningOptions& options = {});

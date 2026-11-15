@@ -2,6 +2,7 @@
 // Engine: a thin stateful wrapper around Catalog for the browser build.
 // It owns the buffers that JavaScript reads directly from WebAssembly memory.
 // Kept free of any Emscripten headers so it can be compiled and tested natively.
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -10,7 +11,9 @@
 #include <vector>
 
 #include "orbitcore/catalog.hpp"
+#include "orbitcore/conjunction.hpp"
 #include "orbitcore/frames.hpp"
+#include "orbitcore/risk.hpp"
 #include "orbitcore/visibility.hpp"
 
 namespace orbitcore {
@@ -29,10 +32,21 @@ class Engine {
   // Adds the satellites found in `text` (2- or 3-line element sets). Returns the total
   // number of objects now loaded.
   int load_tle(const std::string& text) {
+    screen_active_ = false;
     stats_ = catalog_.load_tle_text(text);
     scratch_.assign(3 * catalog_.size(), 0.0);
     positions_.assign(3 * catalog_.size(), 0.0f);
     return count();
+  }
+
+  // Adds one object from an element set (C++ only; used by tests and what-if scenarios).
+  bool add_element_set(const std::string& name, const ElementSet& elements) {
+    screen_active_ = false;
+    if (!catalog_.add_element_set(name, elements)) return false;
+    scratch_.assign(3 * catalog_.size(), 0.0);
+    positions_.assign(3 * catalog_.size(), 0.0f);
+    visibility_.assign(catalog_.size(), 0);
+    return true;
   }
 
   int count() const { return static_cast<int>(catalog_.size()); }
@@ -192,7 +206,81 @@ class Engine {
   const double* look_info() const { return look_.data(); }
   std::size_t look_info_count() const { return look_.size(); }
 
+  // ---- Conjunction screening -------------------------------------------------------------
+  // A screening session finds the close approaches of one object (the "primary") with the rest
+  // of the catalog over a time window. It runs in small steps so that a UI can stay responsive:
+  //   screen_begin(...);  while (screen_step(n) < 1.0) { ...let the page draw a frame... }
+  // then read screen_results(). Layout of one encounter (kEncounterStride doubles), sorted by time:
+  //   0 secondary index   1-2 time of closest approach as a Julian date (day, fraction)
+  //   3 miss distance, km   4 relative speed, km/s   5-7 secondary minus primary in the primary's
+  //   radial / in-track / cross-track axes, km   8 Pc_max   9 sigma* (km)   10 Pc_ceil
+  //   11-13 primary position, km (TEME)   14-16 primary velocity, km/s
+  //   17-19 secondary position, km   20-22 secondary velocity, km/s
+  // hbr_m is the combined hard-body radius in metres used for the probabilities.
+  static constexpr std::size_t kEncounterStride = 23;
+
+  bool screen_begin(int primary, double jd_day, double jd_frac, double span_minutes, double threshold_km,
+                    double hbr_m) {
+    screening_ = ScreeningResult{};
+    screen_packed_.clear();
+    screen_stats_.fill(0.0);
+    screen_active_ = false;
+    if (!in_range(primary) || !(span_minutes > 0.0) || !(threshold_km > 0.0) || !(hbr_m > 0.0)) return false;
+    screen_primary_ = static_cast<std::size_t>(primary);
+    screen_start_ = JulianDate{jd_day, jd_frac};
+    screen_span_minutes_ = span_minutes;
+    screen_options_ = ScreeningOptions{};
+    screen_options_.threshold_km = threshold_km;
+    screen_hbr_km_ = hbr_m / 1000.0;
+    screen_cursor_ = 0;
+    screen_active_ = true;
+    return true;
+  }
+
+  // Screens up to `count` more objects. Returns the progress in [0, 1]; 1 means finished (also
+  // returned when no session is active). Results are available once it reaches 1.
+  double screen_step(int count) {
+    if (!screen_active_) return 1.0;
+    const std::size_t total = catalog_.size();
+    const std::size_t last = std::min(total, screen_cursor_ + static_cast<std::size_t>(std::max(count, 1)));
+    screen_primary_range(catalog_, screen_primary_, screen_start_, screen_span_minutes_, screen_options_,
+                         screen_cursor_, last, screening_);
+    screen_cursor_ = last;
+    if (screen_cursor_ < total) return static_cast<double>(screen_cursor_) / static_cast<double>(total);
+    finish_screening();
+    return 1.0;
+  }
+
+  int screen_event_count() const { return static_cast<int>(screening_.encounters.size()); }  // so far
+  const double* screen_results() const { return screen_packed_.data(); }
+  std::size_t screen_results_size() const { return screen_packed_.size(); }  // number of doubles
+  // objects in the catalog, objects screened after the radial-band filter, SGP4 evaluations
+  const double* screen_stats() const { return screen_stats_.data(); }
+  std::size_t screen_stats_size() const { return screen_stats_.size(); }
+
  private:
+  void finish_screening() {
+    sort_encounters(screening_, screen_start_);
+    screen_packed_.clear();
+    screen_packed_.reserve(screening_.encounters.size() * kEncounterStride);
+    for (const Encounter& e : screening_.encounters) {
+      const MaxProbability worst = maximum_collision_probability(e.miss_distance_km, screen_hbr_km_);
+      const double ceiling = collision_probability_ceiling(e.miss_distance_km, screen_hbr_km_);
+      const double row[kEncounterStride] = {
+          static_cast<double>(e.secondary), e.tca.day, e.tca.frac, e.miss_distance_km, e.relative_speed_km_s,
+          e.miss_rtn.x, e.miss_rtn.y, e.miss_rtn.z, worst.probability, worst.sigma_km, ceiling,
+          e.primary_position.x, e.primary_position.y, e.primary_position.z,
+          e.primary_velocity.x, e.primary_velocity.y, e.primary_velocity.z,
+          e.secondary_position.x, e.secondary_position.y, e.secondary_position.z,
+          e.secondary_velocity.x, e.secondary_velocity.y, e.secondary_velocity.z};
+      screen_packed_.insert(screen_packed_.end(), row, row + kEncounterStride);
+    }
+    screen_stats_ = {static_cast<double>(screening_.stats.objects_total),
+                     static_cast<double>(screening_.stats.objects_screened),
+                     static_cast<double>(screening_.stats.propagations)};
+    screen_active_ = false;
+  }
+
   bool in_range(int i) const { return i >= 0 && static_cast<std::size_t>(i) < catalog_.size(); }
 
   Catalog catalog_;
@@ -205,6 +293,17 @@ class Engine {
   std::array<std::size_t, kMaxStations> station_visible_{};
   std::vector<std::uint8_t> visibility_;
   std::array<double, 3> look_{};
+
+  bool screen_active_{false};
+  ScreeningResult screening_;
+  ScreeningOptions screen_options_;
+  std::size_t screen_primary_{0};
+  std::size_t screen_cursor_{0};
+  JulianDate screen_start_{};
+  double screen_span_minutes_{0.0};
+  double screen_hbr_km_{0.01};
+  std::vector<double> screen_packed_;
+  std::array<double, 3> screen_stats_{};
 };
 
 }  // namespace orbitcore

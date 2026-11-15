@@ -100,6 +100,36 @@ async function main() {
     console.log(`Full-catalog propagation (WebAssembly, ${loaded} objects, 20 passes):`);
     console.log(`  median ${median.toFixed(3)} ms   best ${times[0].toFixed(3)} ms`);
     console.log(`  ${(median * 1e6 / loaded).toFixed(0)} ns per object (median)   failures: ${lastFailures}`);
+    
+    // Conjunction screening session: the ISS against the catalog over 6 hours, in chunks.
+    let primary = -1;
+    for (let i = 0; i < loaded; i++) if (engine.satnum(i) === 25544) { primary = i; break; }
+    if (primary >= 0) {
+      const STRIDE = 23;
+      const screen = (chunk) => {
+        if (!engine.screenBegin(primary, 2440587.5, nowFrac, 6 * 60, 25, 50)) throw new Error('screenBegin failed');
+        let progress = 0, steps = 0;
+        const t0 = performance.now();
+        while (progress < 1) { progress = engine.screenStep(chunk); steps++; }
+        return { rows: Array.from(engine.screenResults()), steps, ms: performance.now() - t0,
+                 stats: Array.from(engine.screenStats()) };
+      };
+      const small = screen(37);
+      const large = screen(100000);
+      const n = small.rows.length / STRIDE;
+      console.log(`\nScreening ${engine.name(primary)} over 6 h (25 km, 50 m): ${n} encounters in ${small.ms.toFixed(0)} ms ` +
+                  `(${small.steps} chunks of 37 objects), ${(small.stats[2] / 1e6).toFixed(2)} M evaluations`);
+      check('screening: chunk size does not change the results',
+            small.rows.length === large.rows.length && small.rows.every((v, i) => v === large.rows[i]));
+      let sorted = true, bounded = true, plausible = true;
+      for (let i = 0; i < n; i++) {
+        const r = small.rows.slice(i * STRIDE, (i + 1) * STRIDE);
+        if (i > 0 && (r[1] - small.rows[(i - 1) * STRIDE + 1]) + (r[2] - small.rows[(i - 1) * STRIDE + 2]) < 0) sorted = false;
+        if (!(r[3] > 0 && r[3] <= 25)) bounded = false;
+        if (!(r[8] <= r[10] && r[8] >= 0 && r[10] <= 1 && r[4] > 0.1 && r[4] < 17)) plausible = false;
+      }
+      check(`screening: ${n} encounters sorted by time, within the threshold, Pc_max <= Pc_ceil`, sorted && bounded && plausible);
+    }
     engine.delete();
   }
   process.exit(ok ? 0 : 1);

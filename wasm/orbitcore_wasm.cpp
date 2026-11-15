@@ -35,6 +35,16 @@ emscripten::val look_view(const Engine& engine) {
   return emscripten::val(emscripten::typed_memory_view(engine.look_info_count(), engine.look_info()));
 }
 
+// Float64Array view of the finished screening session's encounters (Engine::kEncounterStride doubles each).
+emscripten::val screen_results_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.screen_results_size(), engine.screen_results()));
+}
+
+// Float64Array view of [objects in catalog, objects screened, SGP4 evaluations].
+emscripten::val screen_stats_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.screen_stats_size(), engine.screen_stats()));
+}
+
 }  // namespace
 
 EMSCRIPTEN_BINDINGS(orbitcore) {
@@ -60,5 +70,10 @@ EMSCRIPTEN_BINDINGS(orbitcore) {
       .function("visibleCount", &Engine::visible_count)
       .function("visibility", &visibility_view)
       .function("look", &Engine::look)
-      .function("lookInfo", &look_view);
+      .function("lookInfo", &look_view)
+      .function("screenBegin", &Engine::screen_begin)
+      .function("screenStep", &Engine::screen_step)
+      .function("screenEventCount", &Engine::screen_event_count)
+      .function("screenResults", &screen_results_view)
+      .function("screenStats", &screen_stats_view);
 }

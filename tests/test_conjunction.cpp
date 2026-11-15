@@ -204,3 +204,25 @@ TEST_CASE(screening_edge_cases) {
   CHECK(!c.add_element_set("DEEP", deep));                                         // refused, not added
   CHECK(c.size() == 0);
 }
+
+TEST_CASE(screening_in_chunks_equals_one_shot) {
+  Scenario sc = make_scenario();
+  const ScreeningResult whole = screen_primary(sc.catalog, 0, sc.start, sc.span_minutes);
+  CHECK(whole.encounters.size() >= 3);
+  for (std::size_t chunk : {std::size_t{1}, std::size_t{7}, std::size_t{50}, std::size_t{100000}}) {
+    ScreeningResult pieces;
+    for (std::size_t first = 0; first < sc.catalog.size(); first += chunk) {
+      screen_primary_range(sc.catalog, 0, sc.start, sc.span_minutes, ScreeningOptions{}, first, first + chunk, pieces);
+    }
+    sort_encounters(pieces, sc.start);
+    CHECK(pieces.encounters.size() == whole.encounters.size());
+    CHECK(pieces.stats.objects_screened == whole.stats.objects_screened);
+    CHECK(pieces.stats.propagations == whole.stats.propagations);
+    const std::size_t n = std::min(pieces.encounters.size(), whole.encounters.size());
+    for (std::size_t i = 0; i < n; ++i) {
+      CHECK(pieces.encounters[i].secondary == whole.encounters[i].secondary);
+      CHECK_NEAR(seconds_between(pieces.encounters[i].tca, whole.encounters[i].tca), 0.0, 1e-9);
+      CHECK_NEAR(pieces.encounters[i].miss_distance_km, whole.encounters[i].miss_distance_km, 1e-12);
+    }
+  }
+}

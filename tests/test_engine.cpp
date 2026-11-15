@@ -3,6 +3,9 @@
 
 #include "check.hpp"
 #include "engine.hpp"  // from wasm/ (header-only, no Emscripten dependency)
+#include "orbitcore/conjunction.hpp"
+#include "orbitcore/risk.hpp"
+#include "orbitcore/units.hpp"
 
 using namespace orbitcore;
 
@@ -116,4 +119,88 @@ TEST_CASE(engine_station_limit) {
   for (int i = 0; i < 8; ++i) CHECK(engine.add_station(10.0 * i, 0.0, 0.0, 5.0) == i);
   CHECK(engine.add_station(0.0, 0.0, 0.0, 5.0) == -1);  // only 8 stations (one bit each)
   CHECK(engine.station_count() == 8);
+}
+
+// An engine with the ISS (index 0) plus a few objects on other orbits, so that screening finds
+// encounters (the threshold used below is large, so the exact geometry does not matter).
+static Engine make_screening_engine() {
+  Engine engine;
+  engine.load_tle(kIssText);
+  const ElementSet iss = parse_tle("1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  2927",
+                                   "2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.72125391563537").elements;
+  for (int k = 1; k <= 6; ++k) {
+    ElementSet e = iss;
+    e.satnum = 80000 + k;
+    e.inclo = (40.0 + 10.0 * k) * kDegToRad;
+    e.nodeo = std::fmod(iss.nodeo + 0.9 * k, kTwoPi);
+    e.mo = std::fmod(iss.mo + 0.7 * k, kTwoPi);
+    e.bstar = 0.0;
+    engine.add_element_set("OBJECT " + std::to_string(k), e);
+  }
+  return engine;
+}
+
+TEST_CASE(engine_screening_matches_library_and_chunking_does_not_matter) {
+  const double kThreshold = 6000.0;   // large, so every pair has several "encounters" in the window
+  Engine reference = make_screening_engine();
+  CHECK(reference.screen_begin(0, kEpochDay, kEpochFrac, 180.0, kThreshold, 50.0));
+  while (reference.screen_step(1000) < 1.0) {}
+  const int n = reference.screen_event_count();
+  CHECK(n > 5);
+  CHECK(reference.screen_results_size() == static_cast<std::size_t>(n) * Engine::kEncounterStride);
+
+  // Chunk size must not change the answer, bit for bit.
+  for (int chunk : {1, 2, 3, 100}) {
+    Engine engine = make_screening_engine();
+    CHECK(engine.screen_begin(0, kEpochDay, kEpochFrac, 180.0, kThreshold, 50.0));
+    double progress = 0.0, previous = -1.0;
+    int steps = 0;
+    while (progress < 1.0 && ++steps < 1000) {
+      progress = engine.screen_step(chunk);
+      CHECK(progress > previous);        // always moves forward
+      previous = progress;
+    }
+    CHECK(engine.screen_event_count() == n);
+    CHECK(engine.screen_results_size() == reference.screen_results_size());
+    for (std::size_t i = 0; i < reference.screen_results_size(); ++i) {
+      CHECK(engine.screen_results()[i] == reference.screen_results()[i]);
+    }
+  }
+
+  // Layout and consistency of the packed rows.
+  const double* rows = reference.screen_results();
+  const std::size_t stride = Engine::kEncounterStride;
+  double previous_tca = -1e300;
+  for (int i = 0; i < n; ++i) {
+    const double* r = rows + static_cast<std::size_t>(i) * stride;
+    const double tca = (r[1] - kEpochDay) + (r[2] - kEpochFrac);
+    CHECK(tca >= previous_tca);                                      // sorted by time
+    previous_tca = tca;
+    CHECK(r[0] >= 1.0 && r[0] <= 6.0);                               // a secondary, never the primary
+    CHECK(r[3] > 0.0 && r[3] <= kThreshold);                         // miss distance within the threshold
+    CHECK_NEAR(std::sqrt(r[5] * r[5] + r[6] * r[6] + r[7] * r[7]), r[3], 1e-6);   // R, T, N is a rotation of the miss
+    const MaxProbability worst = maximum_collision_probability(r[3], 0.05);
+    CHECK(r[8] == worst.probability);
+    CHECK(r[9] == worst.sigma_km);
+    CHECK(r[10] == collision_probability_ceiling(r[3], 0.05));
+    CHECK(r[8] <= r[10]);                                            // the isotropic maximum is below the ceiling
+    const double dx = r[17] - r[11], dy = r[18] - r[12], dz = r[19] - r[13];
+    CHECK_NEAR(std::sqrt(dx * dx + dy * dy + dz * dz), r[3], 1e-6);  // positions are consistent with the miss distance
+  }
+  CHECK(reference.screen_stats()[0] == 7.0);                         // seven objects in the catalog
+  CHECK(reference.screen_stats()[2] > 0.0);
+}
+
+TEST_CASE(engine_screening_rejects_bad_requests) {
+  Engine engine = make_screening_engine();
+  CHECK(!engine.screen_begin(99, kEpochDay, kEpochFrac, 60.0, 10.0, 10.0));    // no such primary
+  CHECK(!engine.screen_begin(-1, kEpochDay, kEpochFrac, 60.0, 10.0, 10.0));
+  CHECK(!engine.screen_begin(0, kEpochDay, kEpochFrac, 0.0, 10.0, 10.0));      // empty window
+  CHECK(!engine.screen_begin(0, kEpochDay, kEpochFrac, 60.0, 0.0, 10.0));      // no threshold
+  CHECK(!engine.screen_begin(0, kEpochDay, kEpochFrac, 60.0, 10.0, 0.0));      // no hard body
+  CHECK(engine.screen_step(10) == 1.0);                                          // no session: nothing to do
+  CHECK(engine.screen_event_count() == 0);
+  CHECK(engine.screen_begin(0, kEpochDay, kEpochFrac, 60.0, 10.0, 10.0));
+  engine.load_tle(kIssText);                                                     // loading data cancels the session
+  CHECK(engine.screen_step(10) == 1.0);
 }
