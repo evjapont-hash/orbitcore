@@ -4,6 +4,7 @@
 #include "check.hpp"
 #include "engine.hpp"  // from wasm/ (header-only, no Emscripten dependency)
 #include "orbitcore/conjunction.hpp"
+#include "orbitcore/maneuver.hpp"
 #include "orbitcore/risk.hpp"
 #include "orbitcore/units.hpp"
 
@@ -203,4 +204,74 @@ TEST_CASE(engine_screening_rejects_bad_requests) {
   CHECK(engine.screen_begin(0, kEpochDay, kEpochFrac, 60.0, 10.0, 10.0));
   engine.load_tle(kIssText);                                                     // loading data cancels the session
   CHECK(engine.screen_step(10) == 1.0);
+}
+
+TEST_CASE(engine_plans_avoidance_burns) {
+  Engine engine = make_screening_engine();
+  CHECK(engine.plan_avoidance(0, 10.0) == 0);                       // nothing screened yet
+  CHECK(engine.screen_begin(0, kEpochDay, kEpochFrac, 180.0, 6000.0, 50.0));
+  CHECK(engine.plan_avoidance(0, 10.0) == 0);                       // the screening is still running
+  while (engine.screen_step(1000) < 1.0) {}
+  const int events = engine.screen_event_count();
+  CHECK(events > 5);
+  CHECK(engine.plan_avoidance(-1, 10.0) == 0);
+  CHECK(engine.plan_avoidance(events, 10.0) == 0);
+  CHECK(engine.plan_avoidance(0, 0.0) == 0);
+
+  // Plan around the latest encounter, so that some lead times fit inside the window and some do not.
+  const std::size_t stride = Engine::kEncounterStride;
+  const double* ev = engine.screen_results() + static_cast<std::size_t>(events - 1) * stride;
+  const double miss = ev[3];
+  const int index = events - 1;
+  const double target = miss + 5.0;
+  CHECK(engine.plan_avoidance(index, target) == 7);
+  CHECK(engine.plan_results_size() == 7 * Engine::kBurnStride);
+
+  // Recompute, independently of the engine, where the primary is at each burn time.
+  const ParseResult iss = parse_tle("1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  2927",
+                                    "2 25544  51.6416 247.4627 0006703 130.5360 325.0288 15.72125391563537");
+  const Sgp4 sgp4(iss.elements);
+  const double period_s = kTwoPi / (iss.elements.no_kozai / 60.0);
+  const double orbits[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0};
+  int ok_rows = 0, past_rows = 0;
+  for (std::size_t k = 0; k < 7; ++k) {
+    const double* row = engine.plan_results() + k * Engine::kBurnStride;
+    CHECK_NEAR(row[0], orbits[k] * period_s, 1e-9);
+    const int status = static_cast<int>(row[1]);
+    CHECK(status >= 0 && status <= 3);
+    const double burn_minus_tca_days = (row[9] - ev[1]) + (row[10] - ev[2]);
+    CHECK_NEAR(burn_minus_tca_days * 86400.0, -row[0], 1e-3);              // burn time = closest approach - lead
+    const double burn_after_start_days = (row[9] - kEpochDay) + (row[10] - kEpochFrac);
+    if (status == 3) CHECK(burn_after_start_days < 0.0);                    // "in the past" means exactly that
+    if (status == 0) CHECK(burn_after_start_days >= 0.0);
+    if (status == 3) ++past_rows;
+    if (status != 0) continue;
+    ++ok_rows;
+    CHECK_NEAR(std::sqrt(row[2] * row[2] + row[3] * row[3] + row[4] * row[4]), row[5], 1e-12);
+    CHECK(row[5] > 0.0 && row[5] < 100.0);                                  // a few m/s at most for a 5 km change
+    CHECK_NEAR(row[6], miss, 1e-6);                                         // the miss before is the screening's
+    CHECK_NEAR(row[7], target, 1e-6);                                       // and the plan reaches the target
+    CHECK(row[8] == maximum_collision_probability(row[7], 0.05).probability);   // Pc after the burn, from the achieved miss
+    const PropagationResult at_burn = sgp4.propagate(minutes_between(iss.elements.epoch, add_minutes(JulianDate{row[9], row[10]}, 0.0)));
+    CHECK(at_burn.ok());
+    const Vec3d r{at_burn.state.r.x, at_burn.state.r.y, at_burn.state.r.z};
+    const Vec3d v{at_burn.state.v.x, at_burn.state.v.y, at_burn.state.v.z};
+    CHECK_NEAR(std::sqrt((row[11] - r[0]) * (row[11] - r[0]) + (row[12] - r[1]) * (row[12] - r[1]) + (row[13] - r[2]) * (row[13] - r[2])), 0.0, 1e-6);
+    const Vec3d dv = rtn_to_inertial(rtn_axes(r, v), {row[2], row[3], row[4]});
+    CHECK_NEAR(row[14] * row[5] - dv[0], 0.0, 1e-9);                        // the direction is the burn in the inertial frame
+    CHECK_NEAR(row[15] * row[5] - dv[1], 0.0, 1e-9);
+    CHECK_NEAR(row[16] * row[5] - dv[2], 0.0, 1e-9);
+    CHECK_NEAR(std::sqrt(row[14] * row[14] + row[15] * row[15] + row[16] * row[16]), 1.0, 1e-12);
+  }
+  CHECK(ok_rows >= 2);
+  CHECK(past_rows >= 1);
+
+  // A target below the current miss needs no burn at any lead time.
+  CHECK(engine.plan_avoidance(index, miss * 0.5) == 7);
+  for (std::size_t k = 0; k < 7; ++k) {
+    const double* row = engine.plan_results() + k * Engine::kBurnStride;
+    CHECK(static_cast<int>(row[1]) == 1);
+    CHECK(row[5] == 0.0);
+    CHECK_NEAR(row[7], miss, 1e-6);
+  }
 }

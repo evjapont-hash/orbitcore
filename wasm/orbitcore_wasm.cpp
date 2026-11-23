@@ -45,6 +45,11 @@ emscripten::val screen_stats_view(const Engine& engine) {
   return emscripten::val(emscripten::typed_memory_view(engine.screen_stats_size(), engine.screen_stats()));
 }
 
+// Float64Array view of the avoidance-burn options (Engine::kBurnStride doubles each).
+emscripten::val plan_results_view(const Engine& engine) {
+  return emscripten::val(emscripten::typed_memory_view(engine.plan_results_size(), engine.plan_results()));
+}
+
 }  // namespace
 
 EMSCRIPTEN_BINDINGS(orbitcore) {
@@ -75,5 +80,7 @@ EMSCRIPTEN_BINDINGS(orbitcore) {
       .function("screenStep", &Engine::screen_step)
       .function("screenEventCount", &Engine::screen_event_count)
       .function("screenResults", &screen_results_view)
-      .function("screenStats", &screen_stats_view);
+      .function("screenStats", &screen_stats_view)
+      .function("planAvoidance", &Engine::plan_avoidance)
+      .function("planResults", &plan_results_view);
 }

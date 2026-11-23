@@ -13,6 +13,7 @@
 #include "orbitcore/catalog.hpp"
 #include "orbitcore/conjunction.hpp"
 #include "orbitcore/frames.hpp"
+#include "orbitcore/maneuver.hpp"
 #include "orbitcore/risk.hpp"
 #include "orbitcore/visibility.hpp"
 
@@ -223,6 +224,7 @@ class Engine {
                     double hbr_m) {
     screening_ = ScreeningResult{};
     screen_packed_.clear();
+    plan_packed_.clear();
     screen_stats_.fill(0.0);
     screen_active_ = false;
     if (!in_range(primary) || !(span_minutes > 0.0) || !(threshold_km > 0.0) || !(hbr_m > 0.0)) return false;
@@ -250,6 +252,87 @@ class Engine {
     finish_screening();
     return 1.0;
   }
+
+  // ---- Avoidance-burn planning -------------------------------------------------------------
+  // For one encounter of the last finished screening session (index into screen_results(), sorted by
+  // time), finds the smallest impulsive burn of the primary, at each of several lead times before the
+  // closest approach, that raises the miss distance to target_miss_km. Method and limits: maneuver.hpp.
+  // Returns the number of options (0 if there is no finished session, no such encounter, or a bad
+  // target). Layout of one option (kBurnStride doubles), in order of increasing lead time:
+  //   0 lead time before the closest approach, s
+  //   1 status: 0 ok, 1 no burn needed (already far enough), 2 unreachable at this lead time,
+  //     3 the burn would have to happen before the screening started
+  //   2-4 burn delta-v in the primary's radial / in-track / cross-track axes at the burn time, m/s
+  //   5 delta-v magnitude, m/s   6 miss distance before, km   7 miss distance after, km
+  //   8 Pc_max after the burn (same hard-body size as the screening)
+  //   9-10 burn time as a Julian date (day, fraction)   11-13 primary position at the burn, km (TEME)
+  //   14-16 burn direction, unit vector (TEME)
+  static constexpr std::size_t kBurnStride = 17;
+
+  int plan_avoidance(int event_index, double target_miss_km) {
+    plan_packed_.clear();
+    if (screen_active_ || event_index < 0 || !(target_miss_km > 0.0) ||
+        static_cast<std::size_t>(event_index) >= screening_.encounters.size()) {
+      return 0;
+    }
+    const Encounter& e = screening_.encounters[static_cast<std::size_t>(event_index)];
+    const double n_rad_s = catalog_.elements(screen_primary_).no_kozai / 60.0;
+    if (!(n_rad_s > 0.0)) return 0;
+
+    // The encounter geometry in the primary's axes at the closest approach.
+    const Vec3d primary_r{e.primary_position.x, e.primary_position.y, e.primary_position.z};
+    const Vec3d primary_v{e.primary_velocity.x, e.primary_velocity.y, e.primary_velocity.z};
+    const Vec3d relative_v{e.secondary_velocity.x - e.primary_velocity.x,
+                           e.secondary_velocity.y - e.primary_velocity.y,
+                           e.secondary_velocity.z - e.primary_velocity.z};
+    BurnRequest request;
+    request.miss_rtn_km = {e.miss_rtn.x, e.miss_rtn.y, e.miss_rtn.z};
+    request.relative_velocity_rtn_km_s = project_on_rtn(rtn_axes(primary_r, primary_v), relative_v);
+    request.mean_motion_rad_s = n_rad_s;
+    request.target_miss_km = target_miss_km;
+
+    const double period_s = kTwoPi / n_rad_s;
+    static constexpr double kLeadOrbits[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0};
+    for (const double orbits : kLeadOrbits) {
+      const double lead_s = orbits * period_s;
+      const BurnOption option = plan_burn(request, lead_s);
+      const JulianDate burn_time = add_minutes(e.tca, -lead_s / 60.0);
+      int status = static_cast<int>(option.status);
+
+      // Where the primary is at the burn, and which way the burn points in the inertial frame.
+      Vec3d burn_position{0.0, 0.0, 0.0}, direction{0.0, 0.0, 0.0};
+      const PropagationResult at_burn = catalog_.propagate_one(screen_primary_, burn_time);
+      if (at_burn.ok()) {
+        const Vec3d r{at_burn.state.r.x, at_burn.state.r.y, at_burn.state.r.z};
+        const Vec3d v{at_burn.state.v.x, at_burn.state.v.y, at_burn.state.v.z};
+        burn_position = r;
+        if (option.delta_v_m_s > 0.0) {
+          const Vec3d dv = rtn_to_inertial(rtn_axes(r, v), option.delta_v_rtn_m_s);
+          for (std::size_t k = 0; k < 3; ++k) direction[k] = dv[k] / option.delta_v_m_s;
+        }
+      } else if (status == static_cast<int>(BurnStatus::Ok)) {
+        status = static_cast<int>(BurnStatus::Unreachable);
+      }
+      if (status == static_cast<int>(BurnStatus::Ok) && minutes_between(screen_start_, burn_time) < 0.0) {
+        status = static_cast<int>(BurnStatus::InThePast);
+      }
+
+      const double miss_after = option.status == BurnStatus::Unreachable ? option.miss_before_km : option.miss_after_km;
+      const double pc_after = miss_after > 0.0 ? maximum_collision_probability(miss_after, screen_hbr_km_).probability : 0.0;
+      const double row[kBurnStride] = {
+          lead_s, static_cast<double>(status),
+          option.delta_v_rtn_m_s[0], option.delta_v_rtn_m_s[1], option.delta_v_rtn_m_s[2], option.delta_v_m_s,
+          option.miss_before_km, miss_after, pc_after,
+          burn_time.day, burn_time.frac,
+          burn_position[0], burn_position[1], burn_position[2],
+          direction[0], direction[1], direction[2]};
+      plan_packed_.insert(plan_packed_.end(), row, row + kBurnStride);
+    }
+    return static_cast<int>(plan_packed_.size() / kBurnStride);
+  }
+
+  const double* plan_results() const { return plan_packed_.data(); }
+  std::size_t plan_results_size() const { return plan_packed_.size(); }  // number of doubles
 
   int screen_event_count() const { return static_cast<int>(screening_.encounters.size()); }  // so far
   const double* screen_results() const { return screen_packed_.data(); }
@@ -304,6 +387,7 @@ class Engine {
   double screen_hbr_km_{0.01};
   std::vector<double> screen_packed_;
   std::array<double, 3> screen_stats_{};
+  std::vector<double> plan_packed_;
 };
 
 }  // namespace orbitcore

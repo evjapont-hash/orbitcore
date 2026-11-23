@@ -20,3 +20,4 @@ jobs:
           node web/picking.test.mjs
           node web/geometry.test.mjs
           node web/coastline.test.mjs
+          node web/screening.test.mjs

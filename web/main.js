@@ -7,6 +7,7 @@
 import { lookAt, multiply, perspective, rotateZ } from './mat4.js';
 import { pickNearest } from './picking.js';
 import { coneLines, geoJsonToLineSegments, geodeticToScene, rayEllipsoid, rotateZVec, sceneToGeodeticSurface, screenRay } from './geometry.js';
+import { distanceKm, formatOffset, formatPc, formatUtc, nextChunkSize, parseEncounters } from './screening.js';
 
 const EARTH_RADIUS_KM = 6378.137; // WGS-84 equatorial radius; only used to scale the scene
 const JD_UNIX_EPOCH = 2440587.5; // Julian date of 1970-01-01 00:00 UTC
@@ -195,11 +196,13 @@ async function main() {
   const kind = new Uint8Array(count); // 0 active, 1 debris, 2 rocket body
   const KIND_LABELS = ['Active satellite', 'Debris', 'Rocket body'];
   const tally = { active: 0, debris: 0, rocket: 0 };
+  const lowerNames = new Array(count); // for the Find box
   const COLOR_ACTIVE = [80, 200, 255, 255];
   const COLOR_DEBRIS = [255, 150, 60, 255];
   const COLOR_ROCKET = [170, 170, 185, 255];
   for (let i = 0; i < count; i++) {
     const name = engine.name(i);
+    lowerNames[i] = name.toLowerCase();
     let color = COLOR_ACTIVE;
     if (name.endsWith(' DEB')) { color = COLOR_DEBRIS; kind[i] = 1; tally.debris++; }
     else if (name.endsWith(' R/B')) { color = COLOR_ROCKET; kind[i] = 2; tally.rocket++; }
@@ -271,6 +274,42 @@ async function main() {
   gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
 
+  // Conjunction view: the other object's orbit track and ring, and a line between the two objects
+  const track2Scaled = new Float32Array(TRACK_POINTS * 3);
+  const track2Buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, track2Buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, track2Scaled.byteLength, gl.DYNAMIC_DRAW);
+  const track2Vao = gl.createVertexArray();
+  gl.bindVertexArray(track2Vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, track2Buffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  const marker2PosBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, marker2PosBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, 3 * 4, gl.DYNAMIC_DRAW);
+  const marker2Vao = gl.createVertexArray();
+  gl.bindVertexArray(marker2Vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, marker2PosBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  staticBuffer(gl.ARRAY_BUFFER, new Uint8Array([255, 150, 60, 255]));
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+  gl.bindVertexArray(null);
+
+  const lineData = new Float32Array(6); // primary -> secondary, Earth radii
+  const lineBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, lineData.byteLength, gl.DYNAMIC_DRAW);
+  const lineVao = gl.createVertexArray();
+  gl.bindVertexArray(lineVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
   // Ground stations: markers (points, TEME km) and visibility cones (lines, Earth-fixed)
   const MAX_STATIONS = 8; // the engine keeps one visibility bit per station
   const CONE_SPOKES = 24;
@@ -315,6 +354,8 @@ async function main() {
 
   // Camera (orbits the Earth's centre; z is up)
   const cam = { yaw: 0.6, pitch: 0.35, dist: 3.2 }; // dist in Earth radii
+  let camTarget = [0, 0, 0];   // the point the camera orbits: the Earth's centre, or the followed primary
+  let followPrimary = false;   // true while a conjunction is shown: the camera tracks the primary
   let dragging = false, moved = false, lastX = 0, lastY = 0, downX = 0, downY = 0;
   canvas.addEventListener('pointerdown', (e) => {
     dragging = true; moved = false;
@@ -335,9 +376,13 @@ async function main() {
   canvas.addEventListener('pointercancel', () => { dragging = false; });
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
-    cam.dist = Math.max(1.15, Math.min(30, cam.dist * Math.exp(e.deltaY * 0.001)));
+    cam.dist = Math.max(followPrimary ? 1e-4 : 1.15, Math.min(30, cam.dist * Math.exp(e.deltaY * 0.001)));
   }, { passive: false });
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { setPlacing(false); select(-1); } });
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    setPlacing(false);
+    if (activeEvent >= 0) exitEvent(); else select(-1);
+  });
 
   // Simulation clock
   let simMs = Date.now();
@@ -372,6 +417,7 @@ async function main() {
   function handleClick(clientX, clientY) {
     if (!lastViewProj) return;
     if (placing) { placeStationAt(clientX, clientY); return; }
+    if (activeEvent >= 0) exitEvent();
     const rect = canvas.getBoundingClientRect();
     select(pickNearest({
       positions: engine.positions(), count, scale: 1 / EARTH_RADIUS_KM,
@@ -384,6 +430,7 @@ async function main() {
   function select(index) {
     selected = index;
     updateInfoPanel();
+    updateEventsPanel();
   }
 
   // Details of the selected object. Every number comes from the C++ engine (Engine.describe).
@@ -459,6 +506,7 @@ async function main() {
   function setNote(text) { $('station-note').textContent = text; }
 
   function setPlacing(on) {
+    if (on && followPrimary) { setNote('Leave the conjunction view first (Esc)'); return; }
     placing = on;
     canvas.style.cursor = on ? 'crosshair' : '';
     $('btn-add-station').classList.toggle('active', on);
@@ -533,6 +581,196 @@ async function main() {
   });
   syncStations();
 
+  // Conjunction screening. The engine (C++) finds the close approaches of the selected satellite in
+  // small chunks (Engine.screenBegin / screenStep / screenResults) so that the page keeps drawing;
+  // this code runs the chunks, lists the encounters, and shows one of them at its closest approach.
+  const screening = { active: false, done: false, primary: -1, primaryName: '', progress: 0, chunk: 100,
+                      elapsedMs: 0, found: 0, events: [], stats: null, params: null, primaryAgeDays: 0 };
+  let activeEvent = -1;
+  let secondaryPeriodMin = 95;
+  let savedCamera = null;
+
+  function setScreenStatus(text) { $('screen-status').textContent = text; }
+
+  function updateEventsPanel() {
+    const hasResults = screening.events.length > 0 || screening.active;
+    $('events').style.display = (selected >= 0 || hasResults) ? 'block' : 'none';
+    $('btn-screen').textContent = selected >= 0 ? `Screen ${engine.name(selected)}`.slice(0, 44) : 'Select a satellite first';
+    $('btn-screen').disabled = selected < 0 || screening.active;
+    $('events-title').textContent = hasResults ? `CONJUNCTIONS: ${screening.primaryName}` : 'CONJUNCTION SCREENING';
+  }
+
+  function renderEvents() {
+    const list = $('event-list');
+    if (screening.events.length === 0) {
+      list.innerHTML = screening.done ? '<div class="dim">No close approaches in this window.</div>' : '';
+      return;
+    }
+    list.innerHTML = '<div class="ehead"><span>#</span><span>Closest approach (UTC)</span><span>Miss</span>' +
+      '<span>Rel. speed</span><span>Pc_max</span><span>Secondary</span></div>' +
+      screening.events.map((ev, i) =>
+        `<div class="erow${i === activeEvent ? ' active' : ''}" data-event="${i}"><span>${i + 1}</span>` +
+        `<span>${formatUtc(ev.tcaMs)}</span><span>${ev.missKm.toFixed(2)} km</span>` +
+        `<span>${ev.relativeSpeedKmS.toFixed(1)} km/s</span><span>${formatPc(ev.pcMax)}</span>` +
+        `<span>${esc(ev.name)}</span></div>`).join('');
+  }
+
+  function startScreening() {
+    if (selected < 0 || screening.active) return;
+    const days = Number($('screen-days').value) || 3;
+    const thresholdKm = Number($('screen-threshold').value) || 25;
+    const hbrM = Math.max(1, Math.min(500, Number($('screen-hbr').value) || 10));
+    if (activeEvent >= 0) exitEvent();
+    engine.describe(selected, JD_UNIX_EPOCH, simMs / MS_PER_DAY);
+    const primaryAgeDays = engine.info()[16];
+    if (!engine.screenBegin(selected, JD_UNIX_EPOCH, simMs / MS_PER_DAY, days * 1440, thresholdKm, hbrM)) {
+      setScreenStatus('Could not start screening.');
+      return;
+    }
+    Object.assign(screening, { active: true, done: false, primary: selected, primaryName: engine.name(selected),
+                               progress: 0, chunk: 100, elapsedMs: 0, found: 0, events: [], stats: null,
+                               params: { days, thresholdKm, hbrM }, primaryAgeDays });
+    renderEvents();
+    updateEventsPanel();
+    setScreenStatus('Screening 0%...');
+    setTimeout(runScreeningChunk, 0);
+  }
+
+  function runScreeningChunk() {
+    if (!screening.active) return;
+    const t0 = performance.now();
+    const progress = engine.screenStep(screening.chunk);
+    const ms = performance.now() - t0;
+    screening.elapsedMs += ms;
+    screening.chunk = nextChunkSize(screening.chunk, ms); // about 16 ms per chunk, so frames keep coming
+    screening.progress = progress;
+    screening.found = engine.screenEventCount();
+    if (progress < 1) {
+      setScreenStatus(`Screening ${screening.primaryName}: ${(progress * 100).toFixed(0)}% · ${screening.found} found so far`);
+      setTimeout(runScreeningChunk, 0);
+    } else {
+      finishScreening();
+    }
+  }
+
+  function finishScreening() {
+    const events = parseEncounters(Array.from(engine.screenResults())); // copy: the view into WebAssembly memory is short-lived
+    for (const ev of events) { ev.name = engine.name(ev.secondary); ev.norad = engine.satnum(ev.secondary); }
+    screening.events = events;
+    screening.stats = Array.from(engine.screenStats());
+    screening.active = false;
+    screening.done = true;
+    const p = screening.params, st = screening.stats;
+    const age = Math.abs(screening.primaryAgeDays);
+    setScreenStatus(`${events.length} encounters within ${p.thresholdKm} km over ${p.days} d, found in ` +
+                    `${(screening.elapsedMs / 1000).toFixed(1)} s · ${st[1].toLocaleString()} of ${(st[0] - 1).toLocaleString()} ` +
+                    `objects screened · primary element set ${age.toFixed(1)} d old${age > 3 ? ' (stale: expect km-scale error)' : ''}`);
+    renderEvents();
+    updateEventsPanel();
+  }
+
+  function selectEvent(index) {
+    const ev = screening.events[index];
+    if (!ev) return;
+    if (!followPrimary) savedCamera = { yaw: cam.yaw, pitch: cam.pitch, dist: cam.dist };
+    selected = screening.primary;               // the event belongs to the satellite that was screened
+    activeEvent = index;
+    followPrimary = true;
+    cam.dist = Math.max(1e-4, Math.min(1, Math.max(ev.missKm * 8, 40) / EARTH_RADIUS_KM));
+    simMs = ev.tcaMs;                            // jump to the closest approach and hold there
+    paused = true;
+    needsPropagate = true;
+    refreshButtons();
+    engine.describe(ev.secondary, JD_UNIX_EPOCH, simMs / MS_PER_DAY);
+    secondaryPeriodMin = engine.info()[11] > 0 ? engine.info()[11] : 95;
+    updateInfoPanel();
+    renderEvents();
+    showEventDetail(ev, index);
+  }
+
+  function exitEvent() {
+    if (activeEvent < 0) return;
+    activeEvent = -1;
+    followPrimary = false;
+    camTarget = [0, 0, 0];
+    if (savedCamera) { cam.yaw = savedCamera.yaw; cam.pitch = savedCamera.pitch; cam.dist = savedCamera.dist; }
+    savedCamera = null;
+    $('event-detail').style.display = 'none';
+    renderEvents();
+    updateEventsPanel();
+  }
+
+  function stepEvent(seconds) {
+    if (activeEvent < 0) return;
+    simMs += seconds * 1000;
+    needsPropagate = true;
+  }
+
+  function showEventDetail(ev, index) {
+    const p = screening.params;
+    $('ev-title').textContent = `EVENT ${index + 1} OF ${screening.events.length}`;
+    $('ev-lines').textContent = [
+      `Secondary      ${ev.name} (NORAD ${String(ev.norad).padStart(5, '0')})`,
+      `Closest at     ${formatUtc(ev.tcaMs)} UTC`,
+      `Miss distance  ${ev.missKm.toFixed(3)} km     Relative speed  ${ev.relativeSpeedKmS.toFixed(2)} km/s`,
+      `R / T / N      ${ev.rtnKm.map((v) => v.toFixed(2)).join(' / ')} km (secondary relative to primary)`,
+      `Pc_max         ${formatPc(ev.pcMax)}   worst case, at an uncertainty of ${ev.sigmaKm.toFixed(2)} km (hard body ${p.hbrM} m)`,
+      `Pc_ceiling     ${formatPc(ev.pcCeiling)}   upper bound for any uncertainty shape`,
+    ].join('\n');
+    $('event-detail').style.display = 'block';
+    updateEventLive();
+  }
+
+  // Live readout: time relative to the closest approach, and how far apart the two objects are right now.
+  function updateEventLive() {
+    const ev = screening.events[activeEvent];
+    if (!ev || selected < 0) return;
+    const pos = engine.positions();
+    const a = [pos[3 * selected], pos[3 * selected + 1], pos[3 * selected + 2]];
+    const b = [pos[3 * ev.secondary], pos[3 * ev.secondary + 1], pos[3 * ev.secondary + 2]];
+    $('ev-live').textContent = `${formatOffset((simMs - ev.tcaMs) / 1000)}   separation now ${distanceKm(a, b).toFixed(2)} km`;
+  }
+
+  // Find box: select an object by NORAD id or by (part of) its name, and turn the globe to face it.
+  function findObject() {
+    const query = $('find-input').value.trim();
+    if (!query) return;
+    let index = -1;
+    if (/^\d+$/.test(query)) {
+      const id = Number(query);
+      for (let i = 0; i < count && index < 0; i++) if (engine.satnum(i) === id) index = i;
+    } else {
+      const needle = query.toLowerCase();
+      for (let i = 0; i < count && index < 0; i++) if (lowerNames[i] === needle) index = i;       // exact name first
+      for (let i = 0; i < count && index < 0; i++) if (lowerNames[i].includes(needle)) index = i;  // then a partial match
+    }
+    if (index < 0) { $('find-note').textContent = 'not found (only near-Earth objects are loaded)'; return; }
+    $('find-note').textContent = '';
+    if (activeEvent >= 0) exitEvent();
+    select(index);
+    const p = engine.positions();
+    const x = p[3 * index], y = p[3 * index + 1], z = p[3 * index + 2];
+    const r = Math.hypot(x, y, z);
+    if (Number.isFinite(r) && r > 0) { cam.yaw = Math.atan2(y, x); cam.pitch = Math.asin(z / r); }   // look at it from outside
+  }
+  $('btn-find').addEventListener('click', findObject);
+  $('find-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') findObject(); });
+
+  $('btn-screen').addEventListener('click', startScreening);
+  $('event-list').addEventListener('click', (e) => {
+    const row = e.target && e.target.closest ? e.target.closest('[data-event]') : null;
+    if (row) selectEvent(Number(row.dataset.event));
+  });
+  for (const b of document.querySelectorAll('button[data-step]')) {
+    b.addEventListener('click', () => stepEvent(Number(b.dataset.step)));
+  }
+  $('btn-tca').addEventListener('click', () => {
+    const ev = screening.events[activeEvent];
+    if (ev) { simMs = ev.tcaMs; needsPropagate = true; }
+  });
+  $('btn-event-close').addEventListener('click', exitEvent);
+  updateEventsPanel();
+
   // HUD
   let propagateMs = 0, fps = 0;
   function hudText() {
@@ -594,10 +832,17 @@ async function main() {
     }
     gl.viewport(0, 0, width, height);
 
+    if (followPrimary && selected >= 0) {   // conjunction view: keep the primary at the centre of the screen
+      const p = engine.positions();
+      const x = p[3 * selected], y = p[3 * selected + 1], z = p[3 * selected + 2];
+      if (Number.isFinite(x + y + z)) camTarget = [x / EARTH_RADIUS_KM, y / EARTH_RADIUS_KM, z / EARTH_RADIUS_KM];
+    }
     const cp = Math.cos(cam.pitch);
-    const eye = [cam.dist * cp * Math.cos(cam.yaw), cam.dist * cp * Math.sin(cam.yaw), cam.dist * Math.sin(cam.pitch)];
-    const view = lookAt(eye, [0, 0, 0], [0, 0, 1]);
-    const viewProj = multiply(perspective(FOV_Y, width / height, 0.05, 200), view);
+    const eye = [camTarget[0] + cam.dist * cp * Math.cos(cam.yaw), camTarget[1] + cam.dist * cp * Math.sin(cam.yaw),
+                 camTarget[2] + cam.dist * Math.sin(cam.pitch)];
+    const view = lookAt(eye, camTarget, [0, 0, 1]);
+    // The depth range scales with the zoom so that both the whole globe and a 10 km-scale encounter render correctly.
+    const viewProj = multiply(perspective(FOV_Y, width / height, Math.max(1e-7, cam.dist * 0.01), cam.dist * 2000), view);
     const earthMvp = multiply(viewProj, rotateZ(gmst)); // Earth-fixed -> TEME
     lastViewProj = viewProj;
     lastEye = [eye[0], eye[1], eye[2]];
@@ -686,10 +931,50 @@ async function main() {
       gl.drawArrays(gl.POINTS, 0, 1);
     }
 
+    if (activeEvent >= 0 && selected >= 0) {
+      const ev = screening.events[activeEvent];
+      const pos = engine.positions();
+
+      // The other object's orbit track
+      engine.track(ev.secondary, JD_UNIX_EPOCH, jdFrac, secondaryPeriodMin, TRACK_POINTS);
+      const tp2 = engine.trackPoints();
+      for (let k = 0; k < track2Scaled.length; k++) track2Scaled[k] = tp2[k] / EARTH_RADIUS_KM;
+      gl.bindBuffer(gl.ARRAY_BUFFER, track2Buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, track2Scaled);
+      gl.useProgram(meshProgram);
+      gl.uniformMatrix4fv(meshMvp, false, viewProj);
+      gl.uniform4f(meshColor, 1.0, 0.6, 0.25, 0.9);
+      gl.bindVertexArray(track2Vao);
+      gl.drawArrays(gl.LINE_STRIP, 0, TRACK_POINTS);
+
+      // The line between the two objects right now (at the closest approach it is the miss vector)
+      for (let k = 0; k < 3; k++) {
+        lineData[k] = pos[3 * selected + k] / EARTH_RADIUS_KM;
+        lineData[3 + k] = pos[3 * ev.secondary + k] / EARTH_RADIUS_KM;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, lineBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, lineData);
+      gl.uniform4f(meshColor, 1.0, 0.4, 0.4, 0.95);
+      gl.bindVertexArray(lineVao);
+      gl.drawArrays(gl.LINES, 0, 2);
+
+      // A ring on the other object (the primary already has its white ring)
+      gl.bindBuffer(gl.ARRAY_BUFFER, marker2PosBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, pos.subarray(3 * ev.secondary, 3 * ev.secondary + 3));
+      gl.useProgram(pointsProgram);
+      gl.uniformMatrix4fv(pointsViewProj, false, viewProj);
+      gl.uniform1f(pointsScale, 1 / EARTH_RADIUS_KM);
+      gl.uniform1f(pointsSize, 14 * dpr);
+      gl.uniform1f(pointsRing, 1);
+      gl.bindVertexArray(marker2Vao);
+      gl.drawArrays(gl.POINTS, 0, 1);
+    }
+
     if (now - lastHud > 250) {
       $('hud').textContent = hudText();
       renderStationList();
       if (selected >= 0) updateInfoPanel();
+      if (activeEvent >= 0) updateEventLive();
       lastHud = now;
     }
     requestAnimationFrame(frame);

@@ -54,6 +54,39 @@
       border-radius: 3px;
       padding: 3px 6px;
     }
+    #find { top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; align-items: center; }
+    #find input {
+      font: inherit;
+      color: var(--text);
+      background: #0e1a2a;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 4px 8px;
+      width: 15em;
+    }
+    #find-note { color: #ffb454; }
+    #events { bottom: 12px; left: 420px; right: 500px; min-width: 460px; max-height: 44vh; overflow: auto; display: none; }
+    #events .head { color: var(--accent); }
+    #events label { color: var(--dim); }
+    #events input {
+      font: inherit;
+      color: var(--text);
+      background: #0e1a2a;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 3px 6px;
+      width: 4em;
+    }
+    #screen-status { color: var(--dim); margin-top: 6px; min-height: 1.5em; }
+    .ehead, .erow { display: grid; grid-template-columns: 2.4em 10.5em 6.5em 6.5em 5.5em 1fr; gap: 8px; padding: 1px 4px; }
+    .ehead { color: var(--dim); border-bottom: 1px solid var(--line); margin-top: 6px; }
+    .erow { cursor: pointer; }
+    .erow:hover { background: #12233a; }
+    .erow.active { background: #173250; color: var(--accent); }
+    #event-detail { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+    #ev-lines { white-space: pre; margin: 4px 0; }
+    #ev-live { color: var(--accent); }
+    button:disabled { opacity: 0.5; cursor: default; }
     #controls { bottom: 12px; left: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     #controls .label { color: var(--dim); margin-right: 4px; }
     button {
@@ -106,6 +139,46 @@
       <span class="dim">cones end at 1,000 km altitude</span>
     </div>
     <div id="station-note"></div>
+  </div>
+  <div id="find" class="panel">
+    <input id="find-input" placeholder="Find: NORAD id or name (e.g. 25544)" autocomplete="off">
+    <button id="btn-find">Find</button>
+    <span id="find-note"></span>
+  </div>
+  <div id="events" class="panel">
+    <div id="events-title" class="head">CONJUNCTION SCREENING</div>
+    <div class="row">
+      <label for="screen-days">Window</label>
+      <select id="screen-days">
+        <option value="1">1 day</option>
+        <option value="3" selected>3 days</option>
+        <option value="7">7 days</option>
+      </select>
+      <label for="screen-threshold">Within</label>
+      <select id="screen-threshold">
+        <option value="10">10 km</option>
+        <option value="25" selected>25 km</option>
+        <option value="50">50 km</option>
+      </select>
+      <label for="screen-hbr">Hard body</label>
+      <input id="screen-hbr" type="number" min="1" max="500" step="1" value="10"> <span class="dim">m</span>
+      <button id="btn-screen" disabled>Select a satellite first</button>
+    </div>
+    <div id="screen-status"></div>
+    <div id="event-list"></div>
+    <div id="event-detail" style="display: none">
+      <div id="ev-title" class="head"></div>
+      <div id="ev-lines"></div>
+      <div id="ev-live"></div>
+      <div class="row">
+        <button data-step="-60">-60 s</button>
+        <button data-step="-10">-10 s</button>
+        <button data-step="10">+10 s</button>
+        <button data-step="60">+60 s</button>
+        <button id="btn-tca">Closest approach</button>
+        <button id="btn-event-close">Back to globe</button>
+      </div>
+    </div>
   </div>
   <div id="controls" class="panel">
     <span class="label">Time</span>

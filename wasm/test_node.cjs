@@ -129,6 +129,24 @@ async function main() {
         if (!(r[8] <= r[10] && r[8] >= 0 && r[10] <= 1 && r[4] > 0.1 && r[4] < 17)) plausible = false;
       }
       check(`screening: ${n} encounters sorted by time, within the threshold, Pc_max <= Pc_ceil`, sorted && bounded && plausible);
+
+      if (n > 0) {
+        // Avoidance burns for the first encounter: raise its miss distance by 5 km.
+        const BURN_STRIDE = 17;
+        const target = small.rows[3] + 5;
+        const options = engine.planAvoidance(0, target);
+        const plan = Array.from(engine.planResults());
+        console.log(`\nAvoidance burns for the first encounter (miss ${small.rows[3].toFixed(2)} km -> ${target.toFixed(2)} km):`);
+        let consistent = options === 7 && plan.length === 7 * BURN_STRIDE;
+        for (let k = 0; k < options; k++) {
+          const r = plan.slice(k * BURN_STRIDE, (k + 1) * BURN_STRIDE);
+          console.log(`  lead ${(r[0] / 60).toFixed(0).padStart(4)} min  status ${r[1]}  dv ${r[5].toFixed(4)} m/s ` +
+                      `(R ${r[2].toFixed(4)}, T ${r[3].toFixed(4)}, N ${r[4].toFixed(4)})  miss after ${r[7].toFixed(3)} km  Pc_max ${r[8].toExponential(1)}`);
+          if (r[1] === 0 && (Math.abs(r[7] - target) > 1e-6 || !(r[5] > 0 && r[5] < 100) ||
+                             Math.abs(Math.hypot(r[14], r[15], r[16]) - 1) > 1e-9)) consistent = false;
+        }
+        check('planning: 7 lead times; every feasible burn reaches the target with a unit direction', consistent);
+      }
     }
     engine.delete();
   }
