@@ -8,6 +8,7 @@ import { lookAt, multiply, perspective, rotateZ } from './mat4.js';
 import { pickNearest } from './picking.js';
 import { coneLines, geoJsonToLineSegments, geodeticToScene, rayEllipsoid, rotateZVec, sceneToGeodeticSurface, screenRay } from './geometry.js';
 import { distanceKm, formatOffset, formatPc, formatUtc, nextChunkSize, parseEncounters } from './screening.js';
+import { BURN_STATUS, burnDirectionLabel, cwDisplacementKm, formatLead, fromRtn, parseBurnOptions, rtnAxes, statusNote } from './maneuver.js';
 
 const EARTH_RADIUS_KM = 6378.137; // WGS-84 equatorial radius; only used to scale the scene
 const JD_UNIX_EPOCH = 2440587.5; // Julian date of 1970-01-01 00:00 UTC
@@ -309,6 +310,34 @@ async function main() {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
+
+  // Avoidance burn: an arrow (a shaft and four head strokes), a ring at the burn point, and a ghost of the
+  // satellite as it would be at the closest approach if it had burned, with a line to the other object
+  function makeDynamicVao(floats, colorRgba) {
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, floats * 4, gl.DYNAMIC_DRAW);
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    if (colorRgba) {
+      staticBuffer(gl.ARRAY_BUFFER, new Uint8Array(colorRgba));
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 4, gl.UNSIGNED_BYTE, true, 0, 0);
+    }
+    gl.bindVertexArray(null);
+    return { buffer, vao };
+  }
+  const arrowData = new Float32Array(30);       // 10 vertices, Earth radii
+  const arrowGpu = makeDynamicVao(30, null);
+  const burnRingData = new Float32Array(3);     // km
+  const burnRingGpu = makeDynamicVao(3, [90, 255, 140, 255]);
+  const ghostRingData = new Float32Array(3);    // km
+  const ghostRingGpu = makeDynamicVao(3, [80, 220, 255, 255]);
+  const ghostLineData = new Float32Array(6);    // Earth radii
+  const ghostLineGpu = makeDynamicVao(6, null);
 
   // Ground stations: markers (points, TEME km) and visibility cones (lines, Earth-fixed)
   const MAX_STATIONS = 8; // the engine keeps one visibility bit per station
@@ -686,6 +715,7 @@ async function main() {
     updateInfoPanel();
     renderEvents();
     showEventDetail(ev, index);
+    resetBurnPlan(ev);
   }
 
   function exitEvent() {
@@ -695,6 +725,9 @@ async function main() {
     camTarget = [0, 0, 0];
     if (savedCamera) { cam.yaw = savedCamera.yaw; cam.pitch = savedCamera.pitch; cam.dist = savedCamera.dist; }
     savedCamera = null;
+    activeBurn = -1;
+    burnOptions = [];
+    ghostOffsetKm = null;
     $('event-detail').style.display = 'none';
     renderEvents();
     updateEventsPanel();
@@ -728,8 +761,195 @@ async function main() {
     const pos = engine.positions();
     const a = [pos[3 * selected], pos[3 * selected + 1], pos[3 * selected + 2]];
     const b = [pos[3 * ev.secondary], pos[3 * ev.secondary + 1], pos[3 * ev.secondary + 2]];
-    $('ev-live').textContent = `${formatOffset((simMs - ev.tcaMs) / 1000)}   separation now ${distanceKm(a, b).toFixed(2)} km`;
+    const burnNote = activeBurn >= 0 ? `   ${formatOffset((simMs - burnOptions[activeBurn].burnTimeMs) / 1000).replace('T', 'burn ')}` : '';
+    $('ev-live').textContent = `${formatOffset((simMs - ev.tcaMs) / 1000)}   separation now ${distanceKm(a, b).toFixed(2)} km${burnNote}`;
   }
+
+  // ---- Avoidance burn planning ---------------------------------------------------------------
+  // The C++ engine finds, for each of several lead times before the closest approach, the smallest single
+  // burn that raises the miss distance to a target (Engine.planAvoidance). Here we list the options, jump
+  // to one, draw it as an arrow, and show where the satellite would be at the closest approach if it had
+  // burned. The model is linear and for near-circular orbits; see src/maneuver.cpp and docs.
+  let burnOptions = [];
+  let activeBurn = -1;
+  let primaryPeriodMin = 92;
+  let ghostOffsetKm = null;   // where the burn moves the primary at the closest approach (TEME, km)
+
+  function setBurnStatus(text) { $('burn-status').textContent = text; }
+
+  function resetBurnPlan(ev) {
+    burnOptions = [];
+    activeBurn = -1;
+    ghostOffsetKm = null;
+    $('burn-list').innerHTML = '';
+    $('burn-detail').textContent = '';
+    $('burn-actions').style.display = 'none';
+    $('burn-target').value = String(Math.ceil(ev.missKm + 5));
+    engine.describe(screening.primary, JD_UNIX_EPOCH, simMs / MS_PER_DAY);
+    primaryPeriodMin = engine.info()[11] > 0 ? engine.info()[11] : 92;
+    setBurnStatus('Choose a target miss distance and press Plan burns.');
+  }
+
+  function renderBurns() {
+    const list = $('burn-list');
+    if (burnOptions.length === 0) { list.innerHTML = ''; return; }
+    list.innerHTML = '<div class="bhead"><span>#</span><span>Lead</span><span>Size</span><span>Direction</span>' +
+      '<span>Miss after</span><span>Pc_max</span></div>' +
+      burnOptions.map((o, i) => {
+        if (o.status !== BURN_STATUS.OK) {
+          return `<div class="brow off"><span>${i + 1}</span><span>${formatLead(o.leadS)}</span>` +
+                 `<span class="note">${esc(statusNote(o.status))}</span></div>`;
+        }
+        return `<div class="brow${i === activeBurn ? ' active' : ''}" data-burn="${i}"><span>${i + 1}</span>` +
+               `<span>${formatLead(o.leadS)}</span><span>${o.dvMS.toFixed(3)} m/s</span>` +
+               `<span>${esc(burnDirectionLabel(o.dvRtnMS))}</span><span>${o.missAfterKm.toFixed(2)} km</span>` +
+               `<span>${formatPc(o.pcAfter)}</span></div>`;
+      }).join('');
+  }
+
+  function planBurns() {
+    const ev = screening.events[activeEvent];
+    if (!ev) return;
+    const target = Number($('burn-target').value);
+    if (!(target > 0)) { setBurnStatus('Enter a target miss distance in km.'); return; }
+    const count = engine.planAvoidance(activeEvent, target);
+    activeBurn = -1;
+    ghostOffsetKm = null;
+    updateEventLive();
+    $('burn-detail').textContent = '';
+    $('burn-actions').style.display = 'none';
+    if (count === 0) {
+      burnOptions = [];
+      renderBurns();
+      setBurnStatus('Could not plan this encounter.');
+      return;
+    }
+    burnOptions = parseBurnOptions(Array.from(engine.planResults())); // copy: the view into WebAssembly memory is short-lived
+    renderBurns();
+    setBurnStatus(`Smallest single burn that raises the miss from ${ev.missKm.toFixed(2)} km to ${target} km, by lead time. ` +
+                  'Linear model for near-circular orbits; one impulse; no covariance.');
+  }
+
+  function selectBurn(index) {
+    const o = burnOptions[index], ev = screening.events[activeEvent];
+    if (!o || !ev || o.status !== BURN_STATUS.OK) return;
+    activeBurn = index;
+    // Where the burn moves the primary at the closest approach, in the inertial frame.
+    const n = (2 * Math.PI) / (primaryPeriodMin * 60);
+    ghostOffsetKm = fromRtn(rtnAxes(ev.primaryPositionKm, ev.primaryVelocityKmS), cwDisplacementKm(n, o.leadS, o.dvRtnMS));
+    const hbr = screening.params.hbrM;
+    $('burn-detail').textContent = [
+      `Burn         ${burnDirectionLabel(o.dvRtnMS)}, ${o.dvMS.toFixed(3)} m/s, at ${formatUtc(o.burnTimeMs)} UTC`,
+      `             ${formatLead(o.leadS)} before the closest approach`,
+      `Components   radial ${o.dvRtnMS[0].toFixed(3)}   in-track ${o.dvRtnMS[1].toFixed(3)}   cross-track ${o.dvRtnMS[2].toFixed(3)}  (m/s)`,
+      `Effect       miss ${ev.missKm.toFixed(2)} -> ${o.missAfterKm.toFixed(2)} km; Pc_max ${formatPc(ev.pcMax)} -> ${formatPc(o.pcAfter)} (hard body ${hbr} m)`,
+    ].join('\n');
+    $('burn-actions').style.display = 'flex';
+    renderBurns();
+    jumpToBurn();
+  }
+
+  function jumpToBurn() {
+    const o = burnOptions[activeBurn];
+    if (!o) return;
+    simMs = o.burnTimeMs;
+    paused = true;
+    needsPropagate = true;
+    refreshButtons();
+    updateEventLive();
+  }
+
+  function jumpToAfterBurn() {
+    const ev = screening.events[activeEvent];
+    if (!ev) return;
+    simMs = ev.tcaMs;
+    paused = true;
+    needsPropagate = true;
+    refreshButtons();
+    updateEventLive();
+  }
+
+  // Drawn inside the conjunction view: the burn as an arrow, and the burned satellite as a ghost near the closest approach.
+  function drawBurnOverlay(viewProj, dpr, pos, ev) {
+    const o = burnOptions[activeBurn];
+    if (!o) return;
+    const toScene = 1 / EARTH_RADIUS_KM;
+
+    // The burn: a ring at the burn point and an arrow along the burn direction.
+    const d = o.directionTeme;
+    if (Math.hypot(d[0], d[1], d[2]) > 0.5) {
+      const p = o.burnPositionKm.map((v) => v * toScene);
+      const length = Math.max(1e-6, cam.dist * 0.18);        // a fixed fraction of the zoom distance, so it stays visible
+      const tip = [p[0] + d[0] * length, p[1] + d[1] * length, p[2] + d[2] * length];
+      const helper = Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+      let u = [d[1] * helper[2] - d[2] * helper[1], d[2] * helper[0] - d[0] * helper[2], d[0] * helper[1] - d[1] * helper[0]];
+      const un = Math.hypot(u[0], u[1], u[2]);
+      u = u.map((v) => v / un);
+      const w = [d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]];
+      const back = length * 0.25, spread = length * 0.12;
+      const base = [tip[0] - d[0] * back, tip[1] - d[1] * back, tip[2] - d[2] * back];
+      const verts = [p, tip];
+      for (const side of [u, w]) {
+        for (const sign of [1, -1]) {
+          verts.push(tip, [base[0] + sign * side[0] * spread, base[1] + sign * side[1] * spread, base[2] + sign * side[2] * spread]);
+        }
+      }
+      verts.forEach((v, i) => { arrowData[3 * i] = v[0]; arrowData[3 * i + 1] = v[1]; arrowData[3 * i + 2] = v[2]; });
+      gl.bindBuffer(gl.ARRAY_BUFFER, arrowGpu.buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, arrowData);
+      gl.useProgram(meshProgram);
+      gl.uniformMatrix4fv(meshMvp, false, viewProj);
+      gl.uniform4f(meshColor, 0.35, 1.0, 0.55, 1.0);
+      gl.bindVertexArray(arrowGpu.vao);
+      gl.drawArrays(gl.LINES, 0, 10);
+
+      burnRingData.set(o.burnPositionKm);
+      gl.bindBuffer(gl.ARRAY_BUFFER, burnRingGpu.buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, burnRingData);
+      gl.useProgram(pointsProgram);
+      gl.uniformMatrix4fv(pointsViewProj, false, viewProj);
+      gl.uniform1f(pointsScale, toScene);
+      gl.uniform1f(pointsSize, 16 * dpr);
+      gl.uniform1f(pointsRing, 1);
+      gl.bindVertexArray(burnRingGpu.vao);
+      gl.drawArrays(gl.POINTS, 0, 1);
+    }
+
+    // The burned satellite at the closest approach: its displacement is taken as constant for two minutes either side.
+    if (ghostOffsetKm && Math.abs(simMs - ev.tcaMs) <= 120000) {
+      for (let k = 0; k < 3; k++) {
+        ghostRingData[k] = pos[3 * selected + k] + ghostOffsetKm[k];
+        ghostLineData[k] = ghostRingData[k] * toScene;
+        ghostLineData[3 + k] = pos[3 * ev.secondary + k] * toScene;
+      }
+      gl.bindBuffer(gl.ARRAY_BUFFER, ghostLineGpu.buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, ghostLineData);
+      gl.useProgram(meshProgram);
+      gl.uniformMatrix4fv(meshMvp, false, viewProj);
+      gl.uniform4f(meshColor, 0.3, 0.88, 1.0, 0.95);
+      gl.bindVertexArray(ghostLineGpu.vao);
+      gl.drawArrays(gl.LINES, 0, 2);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, ghostRingGpu.buffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, ghostRingData);
+      gl.useProgram(pointsProgram);
+      gl.uniformMatrix4fv(pointsViewProj, false, viewProj);
+      gl.uniform1f(pointsScale, toScene);
+      gl.uniform1f(pointsSize, 14 * dpr);
+      gl.uniform1f(pointsRing, 1);
+      gl.bindVertexArray(ghostRingGpu.vao);
+      gl.drawArrays(gl.POINTS, 0, 1);
+    }
+  }
+
+  $('btn-plan').addEventListener('click', planBurns);
+  $('burn-target').addEventListener('keydown', (e) => { if (e.key === 'Enter') planBurns(); });
+  $('burn-list').addEventListener('click', (e) => {
+    const row = e.target && e.target.closest ? e.target.closest('[data-burn]') : null;
+    if (row) selectBurn(Number(row.dataset.burn));
+  });
+  $('btn-burn-at').addEventListener('click', jumpToBurn);
+  $('btn-burn-after').addEventListener('click', jumpToAfterBurn);
 
   // Find box: select an object by NORAD id or by (part of) its name, and turn the globe to face it.
   function findObject() {
@@ -968,6 +1188,8 @@ async function main() {
       gl.uniform1f(pointsRing, 1);
       gl.bindVertexArray(marker2Vao);
       gl.drawArrays(gl.POINTS, 0, 1);
+
+      drawBurnOverlay(viewProj, dpr, pos, ev);
     }
 
     if (now - lastHud > 250) {

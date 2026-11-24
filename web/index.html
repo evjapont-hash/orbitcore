@@ -65,7 +65,7 @@
       width: 15em;
     }
     #find-note { color: #ffb454; }
-    #events { bottom: 12px; left: 420px; right: 500px; min-width: 460px; max-height: 44vh; overflow: auto; display: none; }
+    #events { bottom: 12px; left: 420px; right: 500px; min-width: 460px; max-height: 62vh; overflow: auto; display: none; }
     #events .head { color: var(--accent); }
     #events label { color: var(--dim); }
     #events input {
@@ -86,6 +86,18 @@
     #event-detail { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
     #ev-lines { white-space: pre; margin: 4px 0; }
     #ev-live { color: var(--accent); }
+    #burn-section { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+    #burn-section .head { color: #8fe3a2; }
+    #burn-status { color: var(--dim); margin-top: 6px; }
+    .bhead, .brow { display: grid; grid-template-columns: 2em 5.5em 7.5em 1fr 7em 5.5em; gap: 8px; padding: 1px 4px; }
+    .bhead { color: var(--dim); border-bottom: 1px solid var(--line); margin-top: 6px; }
+    .brow { cursor: pointer; }
+    .brow:hover { background: #12233a; }
+    .brow.active { background: #173a2c; color: #8fe3a2; }
+    .brow.off { color: var(--dim); cursor: default; }
+    .brow.off:hover { background: none; }
+    .brow .note { grid-column: 3 / -1; }
+    #burn-detail { white-space: pre; margin: 6px 0; }
     button:disabled { opacity: 0.5; cursor: default; }
     #controls { bottom: 12px; left: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
     #controls .label { color: var(--dim); margin-right: 4px; }
@@ -177,6 +189,21 @@
         <button data-step="60">+60 s</button>
         <button id="btn-tca">Closest approach</button>
         <button id="btn-event-close">Back to globe</button>
+      </div>
+      <div id="burn-section">
+        <div class="head">AVOIDANCE BURN</div>
+        <div class="row">
+          <label for="burn-target">Target miss</label>
+          <input id="burn-target" type="number" min="0.5" step="1" value="10"> <span class="dim">km</span>
+          <button id="btn-plan">Plan burns</button>
+        </div>
+        <div id="burn-status"></div>
+        <div id="burn-list"></div>
+        <div id="burn-detail"></div>
+        <div id="burn-actions" class="row" style="display: none">
+          <button id="btn-burn-at">At the burn</button>
+          <button id="btn-burn-after">At closest approach</button>
+        </div>
       </div>
     </div>
   </div>

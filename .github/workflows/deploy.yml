@@ -83,7 +83,7 @@ jobs:
       - name: Assemble site
         run: |
           mkdir -p site/data
-          cp web/index.html web/main.js web/mat4.js web/picking.js web/geometry.js web/screening.js site/
+          cp web/index.html web/main.js web/mat4.js web/picking.js web/geometry.js web/screening.js web/maneuver.js site/
           cp web/data/ne_110m_coastline.geojson site/data/
           cp build-wasm/orbitcore_wasm.js build-wasm/orbitcore_wasm.wasm site/
           cp catalog-cache/catalog.tle site/catalog.tle

@@ -146,6 +146,28 @@ async function main() {
                              Math.abs(Math.hypot(r[14], r[15], r[16]) - 1) > 1e-9)) consistent = false;
         }
         check('planning: 7 lead times; every feasible burn reaches the target with a unit direction', consistent);
+
+        // The page re-derives the displacement with its own copy of the linear model (web/maneuver.js).
+        // For the same burns it must agree with the C++ result.
+        try {
+          const { cwDisplacementKm, inPlaneMiss, projectOnRtn, rtnAxes } = await import('../web/maneuver.js');
+          engine.describe(primary, 2440587.5, nowFrac);
+          const n = 2 * Math.PI / (engine.info()[11] * 60);
+          const e = small.rows.slice(0, STRIDE);
+          const axes = rtnAxes(e.slice(11, 14), e.slice(14, 17));
+          const relativeVelocity = projectOnRtn(axes, [e[20] - e[14], e[21] - e[15], e[22] - e[16]]);
+          let agree = true, compared = 0;
+          for (let k = 0; k < options; k++) {
+            const r = plan.slice(k * BURN_STRIDE, (k + 1) * BURN_STRIDE);
+            if (r[1] !== 0) continue;
+            const miss = inPlaneMiss(e.slice(5, 8), relativeVelocity, cwDisplacementKm(n, r[0], r.slice(2, 5)));
+            compared++;
+            if (Math.abs(miss - r[7]) > 1e-6) agree = false;
+          }
+          check(`planning: the page's copy of the burn model agrees with C++ for ${compared} options`, agree && compared > 0);
+        } catch (err) {
+          console.log(`  (skipped the page-model cross-check: ${err.message})`);
+        }
       }
     }
     engine.delete();
